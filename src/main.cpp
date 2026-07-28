@@ -231,20 +231,23 @@ bool setRelay(uint8_t channel, bool turnOn)
     const uint8_t bitMask = 1U << (channel - 1);
     const bool outputHigh =
         RELAY_ACTIVE_HIGH ? turnOn : !turnOn;
+    uint8_t nextRelayOutput = relayOutput;
 
     if (outputHigh)
     {
-        relayOutput |= bitMask;
+        nextRelayOutput |= bitMask;
     }
     else
     {
-        relayOutput &= static_cast<uint8_t>(~bitMask);
+        nextRelayOutput &= static_cast<uint8_t>(~bitMask);
     }
 
-    if (!tcaWriteRegister(TCA_OUTPUT_REG, relayOutput))
+    if (!tcaWriteRegister(TCA_OUTPUT_REG, nextRelayOutput))
     {
         return false;
     }
+
+    relayOutput = nextRelayOutput;
 
     if (channel == 1)
     {
@@ -1029,19 +1032,16 @@ void processCommand(String command)
         alarmActive = false;
 
         Serial.println(
-            "[RESET] Alarm cleared"
+            "[RESET] Alarm cleared; restore delay started"
         );
 
-        if (setRelay(1, true))
-        {
-            queueServerMessage(
-                "RESET",
-                "NORMAL",
-                "Alarm ถูกรีเซ็ตแล้ว\n"
-                "Relay CH1 ถูกสั่ง ON\n"
-                "ระบบกลับมาทำงานตามปกติ"
-            );
-        }
+        startRelayRestoreDelay("manual_reset");
+        queueServerMessage(
+            "RESET",
+            "NORMAL",
+            "Alarm ถูกรีเซ็ตแล้ว\n"
+            "ระบบจะรอ 30 วินาทีก่อนเปิด Relay CH1 อัตโนมัติ"
+        );
     }
     else if (command == "TEST")
     {
@@ -1189,7 +1189,8 @@ String buildSystemCheckMessage()
     const bool commandServerOk = checkCommandServer();
     const bool diRawNormal = readDI1Raw() == HIGH;
     const bool diStateNormal = !di1Active && !readDI1();
-    const bool relayStateOk = relay1On == (!alarmActive && !di1Active && !readDI1());
+    const bool expectedRelayOn = !alarmActive && !di1Active && !readDI1() && !relayRestorePending;
+    const bool relayStateOk = relay1On == expectedRelayOn;
     const bool lineQueueOk = !serverMessagePending;
     const bool heapOk = ESP.getFreeHeap() > 50000;
     const bool restoreOk = !relayRestorePending || (!di1Active && !readDI1());
@@ -1351,23 +1352,14 @@ bool executeRemoteCommand(const String &command)
         }
 
         alarmActive = false;
-
-        if (setRelay(1, true))
-        {
-            queueServerMessage(
-                "RESET",
-                "NORMAL",
-                "Alarm ถูกรีเซ็ตผ่าน LINE\nRelay CH1 ถูกสั่ง ON\nระบบกลับมาทำงานตามปกติ"
-            );
-            return true;
-        }
+        startRelayRestoreDelay("line_reset");
 
         queueServerMessage(
-            "COMMAND_FAILED",
-            "ACTIVE",
-            "รีเซ็ต Alarm ผ่าน LINE แล้ว\nแต่สั่ง Relay CH1 ON ไม่สำเร็จ"
+            "RESET",
+            "NORMAL",
+            "Alarm ถูกรีเซ็ตผ่าน LINE\nระบบจะรอ 30 วินาทีก่อนเปิด Relay CH1 อัตโนมัติ"
         );
-        return false;
+        return true;
     }
 
     return false;
