@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import time
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,20 @@ LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
 
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
+
+CASON_CHAOS_MODE = os.getenv("CASON_CHAOS_MODE", "0") == "1"
+CASON_CHAOS_DELAY_SECONDS = float(
+    os.getenv("CASON_CHAOS_DELAY_SECONDS", "0") or "0"
+)
+CASON_CHAOS_HTTP_500_RATE = float(
+    os.getenv("CASON_CHAOS_HTTP_500_RATE", "0") or "0"
+)
+CASON_CHAOS_BAD_JSON_RATE = float(
+    os.getenv("CASON_CHAOS_BAD_JSON_RATE", "0") or "0"
+)
+CASON_CHAOS_DROP_LINE_RATE = float(
+    os.getenv("CASON_CHAOS_DROP_LINE_RATE", "0") or "0"
+)
 
 DUPLICATE_BLOCK_SECONDS = int(
     os.getenv("CASON_DUPLICATE_BLOCK_SECONDS", "300")
@@ -60,6 +75,53 @@ ALLOWED_LINE_COMMANDS = {
     "WIFI_RESET",
 }
 _last_sent = {}
+
+
+def clamp_rate(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def chaos_hit(rate):
+    return CASON_CHAOS_MODE and random.random() < clamp_rate(rate)
+
+
+def maybe_apply_chaos(handler, path):
+    if not CASON_CHAOS_MODE:
+        return False
+
+    if CASON_CHAOS_DELAY_SECONDS > 0:
+        print(
+            f"[CHAOS] delay {CASON_CHAOS_DELAY_SECONDS}s path={path}"
+        )
+        time.sleep(CASON_CHAOS_DELAY_SECONDS)
+
+    if chaos_hit(CASON_CHAOS_HTTP_500_RATE):
+        print(f"[CHAOS] forced HTTP 503 path={path}")
+        send_json(
+            handler,
+            503,
+            {
+                "ok": False,
+                "error": "chaos_forced_http_503",
+            }
+        )
+        return True
+
+    if chaos_hit(CASON_CHAOS_BAD_JSON_RATE):
+        print(f"[CHAOS] forced bad JSON path={path}")
+        body = b"{bad-json"
+        handler.send_response(200)
+        handler.send_header(
+            "Content-Type",
+            "application/json; charset=utf-8"
+        )
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.wfile.write(body)
+        return True
+
+    return False
 
 
 def send_json(handler, code, payload):
@@ -457,6 +519,10 @@ def build_line_message(data):
 
 
 def push_line(user_id, text):
+    if chaos_hit(CASON_CHAOS_DROP_LINE_RATE):
+        print(f"[CHAOS] simulated LINE drop user={user_id}")
+        return False, 0, "chaos_simulated_line_drop"
+
     if not LINE_TOKEN:
         return False, 0, (
             "ไม่พบ LINE_CHANNEL_ACCESS_TOKEN ในไฟล์ .env"
@@ -557,6 +623,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        if maybe_apply_chaos(self, path):
+            return
+
         if path == "/api/command":
             self.handle_command_poll()
             return
@@ -593,11 +662,15 @@ class Handler(BaseHTTPRequestHandler):
                 "queued_commands": len(
                     load_command_queue()
                 ),
+                "chaos_mode": CASON_CHAOS_MODE,
             }
         )
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+
+        if maybe_apply_chaos(self, path):
+            return
 
         if path == "/webhook":
             self.handle_line_webhook()
@@ -1040,6 +1113,14 @@ def main():
         f"LINE Users ที่บันทึกไว้: "
         f"{len(load_users())}"
     )
+    if CASON_CHAOS_MODE:
+        print("CHAOS MODE: เปิดใช้งาน")
+        print(f"- delay_seconds={CASON_CHAOS_DELAY_SECONDS}")
+        print(f"- http_500_rate={CASON_CHAOS_HTTP_500_RATE}")
+        print(f"- bad_json_rate={CASON_CHAOS_BAD_JSON_RATE}")
+        print(f"- drop_line_rate={CASON_CHAOS_DROP_LINE_RATE}")
+    else:
+        print("CHAOS MODE: ปิดอยู่")
     print("หยุดโปรแกรมด้วย Control + C")
     print("=" * 55)
 
