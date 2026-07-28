@@ -7,3 +7,4 @@ src/line_secret.h
 .env
 command_queue.json
 command_results.json
+command_inflight.json

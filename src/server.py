@@ -49,6 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 USER_FILE = PROJECT_ROOT / "line_users.json"
 COMMAND_FILE = PROJECT_ROOT / "command_queue.json"
 COMMAND_RESULT_FILE = PROJECT_ROOT / "command_results.json"
+COMMAND_INFLIGHT_FILE = PROJECT_ROOT / "command_inflight.json"
 ALLOWED_LINE_COMMANDS = {
     "STATUS",
     "TEST",
@@ -182,6 +183,90 @@ def save_command_result(result):
     )
 
 
+def load_inflight_commands():
+    if not COMMAND_INFLIGHT_FILE.exists():
+        return {}
+
+    try:
+        data = json.loads(
+            COMMAND_INFLIGHT_FILE.read_text(encoding="utf-8")
+        )
+        if isinstance(data, dict):
+            return {
+                str(key): value for key, value in data.items()
+                if isinstance(value, dict)
+            }
+    except Exception as exc:
+        print(f"[COMMAND] อ่านคำสั่งที่กำลังทำงานไม่สำเร็จ: {exc}")
+
+    return {}
+
+
+def save_inflight_commands(commands):
+    COMMAND_INFLIGHT_FILE.write_text(
+        json.dumps(
+            commands,
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+
+def remember_inflight_command(command):
+    command_id = str(command.get("id", ""))
+
+    if not command_id:
+        return
+
+    commands = load_inflight_commands()
+    commands[command_id] = command
+
+    # เก็บเฉพาะคำสั่งล่าสุด ป้องกันไฟล์โตถ้า ESP32 ไม่ส่งผลกลับ
+    items = sorted(
+        commands.items(),
+        key=lambda item: int(item[1].get("created_at", 0))
+    )[-50:]
+    save_inflight_commands(dict(items))
+
+
+def pop_inflight_command(command_id):
+    command_id = str(command_id or "")
+
+    if not command_id:
+        return {}
+
+    commands = load_inflight_commands()
+    command = commands.pop(command_id, {})
+    save_inflight_commands(commands)
+    return command
+
+
+def build_command_result_message(command, ok, detail):
+    command = str(command or "").upper()
+    detail = str(detail or "")
+
+    status_text = "สำเร็จ" if ok else "ไม่สำเร็จ"
+    action_text = {
+        "STATUS": "ดูสถานะระบบ",
+        "TEST": "ทดสอบระบบ",
+        "ON": "เปิด Relay CH1",
+        "OFF": "ปิด Relay CH1",
+        "RESET": "รีเซ็ต Alarm",
+    }.get(command, command or "ไม่ทราบคำสั่ง")
+
+    lines = [
+        "ผลการทำงานจาก ESP32",
+        f"คำสั่ง: {action_text}",
+        f"สถานะ: {status_text}",
+    ]
+
+    if detail and detail not in {"executed", "refused_or_failed"}:
+        lines.append(f"รายละเอียด: {detail}")
+
+    return "\n".join(lines)
+
+
 def is_authorized_command_user(user_id):
     return bool(user_id) and user_id in set(load_users())
 
@@ -238,6 +323,7 @@ def pop_next_command():
 
     command = queue.pop(0)
     save_command_queue(queue)
+    remember_inflight_command(command)
     return command
 
 
@@ -649,7 +735,7 @@ class Handler(BaseHTTPRequestHandler):
                             (
                                 f"รับคำสั่ง {command} แล้ว\n"
                                 f"เลขคำสั่ง: {command_id}\n"
-                                "รอ ESP32 ดึงคำสั่งไปทำงาน"
+                                "กำลังรอ ESP32 ทำงานและส่งผลกลับ"
                             )
                         )
 
@@ -738,11 +824,25 @@ class Handler(BaseHTTPRequestHandler):
         data["received_at"] = int(time.time())
         save_command_result(data)
 
+        command_id = str(data.get("id", ""))
+        inflight_command = pop_inflight_command(command_id)
+        user_id = inflight_command.get("user_id", "")
+
         print(
             f"[COMMAND] result id={data.get('id')} "
             f"command={data.get('command')} "
             f"ok={data.get('ok')}"
         )
+
+        if user_id:
+            push_line(
+                user_id,
+                build_command_result_message(
+                    data.get("command"),
+                    bool(data.get("ok")),
+                    data.get("detail", "")
+                )
+            )
 
         send_json(
             self,
