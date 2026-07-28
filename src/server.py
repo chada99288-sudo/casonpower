@@ -56,6 +56,7 @@ ALLOWED_LINE_COMMANDS = {
     "ON",
     "OFF",
     "RESET",
+    "CHECK",
 }
 _last_sent = {}
 
@@ -253,6 +254,7 @@ def build_command_result_message(command, ok, detail):
         "ON": "เปิด Relay CH1",
         "OFF": "ปิด Relay CH1",
         "RESET": "รีเซ็ต Alarm",
+        "CHECK": "ตรวจระบบทั้งหมด",
     }.get(command, command or "ไม่ทราบคำสั่ง")
 
     lines = [
@@ -284,6 +286,9 @@ def normalize_line_command(text):
         "รีเซ็ต": "RESET",
         "ทดสอบ": "TEST",
         "เช็ค": "TEST",
+        "ตรวจระบบ": "CHECK",
+        "ตรวจสอบระบบ": "CHECK",
+        "เช็คระบบ": "CHECK",
     }
 
     command = aliases.get(command, command)
@@ -748,7 +753,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "TEST - ตรวจสอบ LINE\n"
                                 "ON - เปิด Relay CH1\n"
                                 "OFF - ปิด Relay CH1\n"
-                                "RESET - รีเซ็ต alarm"
+                                "RESET - รีเซ็ต alarm\n"
+                                "CHECK - ตรวจระบบทั้งหมด"
                             )
                         )
 
@@ -834,14 +840,12 @@ class Handler(BaseHTTPRequestHandler):
             f"ok={data.get('ok')}"
         )
 
+        # ESP32 ส่งข้อความผลลัพธ์จริงเข้า LINE เองผ่าน LINE Direct
+        # จึงไม่ push ผลซ้ำจาก server ตรงนี้ เพื่อไม่ให้ LINE แสดงข้อความซ้ำกัน
         if user_id:
-            push_line(
-                user_id,
-                build_command_result_message(
-                    data.get("command"),
-                    bool(data.get("ok")),
-                    data.get("detail", "")
-                )
+            print(
+                f"[COMMAND] result notification suppressed "
+                f"to avoid duplicate LINE message user={user_id}"
             )
 
         send_json(

@@ -105,6 +105,10 @@ void printDI1Detail(const char *prefix);
 void updateStatusIndicators(const char *reason);
 void processCommand(String command);
 void showStatus();
+String buildSystemCheckMessage();
+bool checkCommandServer();
+bool isRelayControllerOnline();
+bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url);
 bool isImportantLineEvent(const String &eventName);
 
 // =====================================================
@@ -127,6 +131,36 @@ bool tcaWriteRegister(uint8_t reg, uint8_t value)
     }
 
     return true;
+}
+
+bool tcaReadRegister(uint8_t reg, uint8_t &value)
+{
+    Wire.beginTransmission(TCA9554_ADDRESS);
+    Wire.write(reg);
+
+    const uint8_t result = Wire.endTransmission(false);
+
+    if (result != 0)
+    {
+        Serial.print("[I2C] Read address failed, code=");
+        Serial.println(result);
+        return false;
+    }
+
+    if (Wire.requestFrom(TCA9554_ADDRESS, static_cast<uint8_t>(1)) != 1)
+    {
+        Serial.println("[I2C] Read failed: no data");
+        return false;
+    }
+
+    value = Wire.read();
+    return true;
+}
+
+bool isRelayControllerOnline()
+{
+    uint8_t value = 0;
+    return tcaReadRegister(TCA_OUTPUT_REG, value);
 }
 
 bool tcaBegin()
@@ -901,6 +935,15 @@ void processCommand(String command)
     {
         showStatus();
     }
+    else if (command == "CHECK")
+    {
+        showStatus();
+        queueServerMessage(
+            "SYSTEM_CHECK",
+            "NORMAL",
+            buildSystemCheckMessage()
+        );
+    }
     else if (command == "RAW")
     {
         printDI1Detail("[DI1]");
@@ -926,6 +969,9 @@ void processCommand(String command)
         );
         Serial.println(
             "STATUS - แสดงสถานะ"
+        );
+        Serial.println(
+            "CHECK  - ตรวจระบบทั้งหมด"
         );
         Serial.println(
             "RAW    - อ่านค่าดิบ DI1"
@@ -966,6 +1012,98 @@ String buildStatusMessage()
     return message;
 }
 
+bool checkCommandServer()
+{
+    if (!COMMAND_SERVER_ENABLED || strlen(COMMAND_SERVER_BASE_URL) == 0)
+    {
+        return false;
+    }
+
+    if (!connectWiFi())
+    {
+        return false;
+    }
+
+    String url = COMMAND_SERVER_BASE_URL;
+    url += "/health";
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    HTTPClient http;
+
+    if (!httpBeginForURL(http, plainClient, secureClient, url))
+    {
+        return false;
+    }
+
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.addHeader("Connection", "close");
+
+    const int code = http.GET();
+    http.end();
+
+    return code >= 200 && code < 300;
+}
+
+String okText(bool ok)
+{
+    return ok ? "OK" : "NG";
+}
+
+String buildSystemCheckMessage()
+{
+    const bool wifiOk = WiFi.status() == WL_CONNECTED || connectWiFi();
+    const bool relayControllerOk = isRelayControllerOnline();
+    const bool commandServerOk = checkCommandServer();
+    const bool diRawNormal = readDI1Raw() == HIGH;
+    const bool diStateNormal = !di1Active && !readDI1();
+    const bool relayStateOk = relay1On == (!alarmActive && !di1Active && !readDI1());
+    const bool lineQueueOk = !serverMessagePending;
+    const bool heapOk = ESP.getFreeHeap() > 50000;
+    const bool restoreOk = !relayRestorePending || (!di1Active && !readDI1());
+    const bool allOk = wifiOk && relayControllerOk && commandServerOk &&
+                       diStateNormal && relayStateOk && lineQueueOk &&
+                       heapOk && restoreOk;
+
+    String message;
+    message += "ตรวจระบบทั้งหมด\n";
+    message += "ผลรวม: ";
+    message += allOk ? "ปกติ" : "ต้องตรวจสอบ";
+    message += "\nWi-Fi: " + okText(wifiOk);
+
+    if (wifiOk)
+    {
+        message += "\nIP: " + WiFi.localIP().toString();
+    }
+
+    message += "\nRender Server: " + okText(commandServerOk);
+    message += "\nRelay Controller: " + okText(relayControllerOk);
+    message += "\nDI1 RAW: " + String(readDI1Raw());
+    message += diRawNormal ? " (ปกติ)" : " (ผิดปกติ)";
+    message += "\nDI1 State: ";
+    message += diStateNormal ? "NORMAL" : "ACTIVE";
+    message += "\nRelay CH1: ";
+    message += relay1On ? "ON" : "OFF";
+    message += "\nRelay Logic: " + okText(relayStateOk);
+    message += "\nAlarm: ";
+    message += alarmActive ? "ACTIVE" : "NORMAL";
+    message += "\nRestore: ";
+    message += relayRestorePending ? "PENDING" : "IDLE";
+    message += "\nLINE Queue: ";
+    message += serverMessagePending ? "PENDING" : "EMPTY";
+    message += "\nStatus Light: ";
+    message += indicatorStateText(currentIndicatorState);
+    message += "\nFree Heap: " + String(ESP.getFreeHeap());
+
+    if (!allOk)
+    {
+        message += "\nหมายเหตุ: ถ้า DI1 ผิดปกติหรือกำลัง Restore ระบบอาจยังไม่เขียวจนกว่าจะกลับปกติ";
+    }
+
+    return message;
+}
+
 bool executeRemoteCommand(const String &command)
 {
     Serial.print("[REMOTE-COMMAND] ");
@@ -978,6 +1116,17 @@ bool executeRemoteCommand(const String &command)
             "STATUS",
             "NORMAL",
             buildStatusMessage()
+        );
+        return true;
+    }
+
+    if (command == "CHECK")
+    {
+        showStatus();
+        queueServerMessage(
+            "SYSTEM_CHECK",
+            "NORMAL",
+            buildSystemCheckMessage()
         );
         return true;
     }
@@ -1432,7 +1581,7 @@ void setup()
     Serial.println("Ready.");
     Serial.println(
         "Type: TEST, ON, OFF, ALARM, RESET, "
-        "STATUS, RAW, HELP"
+        "STATUS, CHECK, RAW, HELP"
     );
 }
 
