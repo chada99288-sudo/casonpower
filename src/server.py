@@ -57,6 +57,7 @@ ALLOWED_LINE_COMMANDS = {
     "OFF",
     "RESET",
     "CHECK",
+    "WIFI_RESET",
 }
 _last_sent = {}
 
@@ -255,6 +256,7 @@ def build_command_result_message(command, ok, detail):
         "OFF": "ปิด Relay CH1",
         "RESET": "รีเซ็ต Alarm",
         "CHECK": "ตรวจระบบทั้งหมด",
+        "WIFI_RESET": "ล้างค่า Wi-Fi",
     }.get(command, command or "ไม่ทราบคำสั่ง")
 
     lines = [
@@ -289,6 +291,11 @@ def normalize_line_command(text):
         "ตรวจระบบ": "CHECK",
         "ตรวจสอบระบบ": "CHECK",
         "เช็คระบบ": "CHECK",
+        "ล้างไวไฟ": "WIFI_RESET",
+        "ล้าง WiFi": "WIFI_RESET",
+        "ล้าง WIFI": "WIFI_RESET",
+        "RESET_WIFI": "WIFI_RESET",
+        "WIFI_RESET": "WIFI_RESET",
     }
 
     command = aliases.get(command, command)
@@ -754,7 +761,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "ON - เปิด Relay CH1\n"
                                 "OFF - ปิด Relay CH1\n"
                                 "RESET - รีเซ็ต alarm\n"
-                                "CHECK - ตรวจระบบทั้งหมด"
+                                "CHECK - ตรวจระบบทั้งหมด\n"
+                                "WIFI_RESET - ล้างค่า Wi-Fi"
                             )
                         )
 

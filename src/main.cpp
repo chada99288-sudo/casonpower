@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
@@ -15,8 +16,8 @@
 // -----------------------------------------------------
 // Wi-Fi
 // -----------------------------------------------------
-const char *WIFI_SSID = "Chubay_2.4G";
-const char *WIFI_PASSWORD = "Chubay2125";
+const char *WIFI_SETUP_AP_NAME = "CASON-SETUP";
+const char *WIFI_SETUP_AP_PASSWORD = "cason1234";
 
 // -----------------------------------------------------
 // LINE Messaging API Direct
@@ -89,6 +90,7 @@ uint32_t di1LastChangeTime = 0;
 uint32_t relayRestoreStartTime = 0;
 uint32_t lastHeartbeatTime = 0;
 uint32_t lastCommandPollTime = 0;
+uint32_t lastWiFiPortalTime = 0;
 
 // คิวเหตุการณ์ที่จะส่ง LINE โดยตรง
 String pendingEvent;
@@ -105,6 +107,9 @@ void printDI1Detail(const char *prefix);
 void updateStatusIndicators(const char *reason);
 void processCommand(String command);
 void showStatus();
+void queueServerMessage(const String &eventName, const String &statusName, const String &message);
+void updateServerQueue();
+void resetWiFiSettings();
 String buildSystemCheckMessage();
 bool checkCommandServer();
 bool isRelayControllerOnline();
@@ -320,13 +325,13 @@ bool connectWiFi()
         return true;
     }
 
-    Serial.print("[WIFI] Connecting");
-
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
-    WiFi.persistent(false);
+    WiFi.persistent(true);
     WiFi.setSleep(false);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    Serial.print("[WIFI] Connecting with saved credentials");
+    WiFi.begin();
 
     const uint32_t startTime = millis();
 
@@ -334,20 +339,76 @@ bool connectWiFi()
     {
         if (millis() - startTime >= WIFI_CONNECT_TIMEOUT_MS)
         {
-            Serial.println();
-            Serial.println("[WIFI] Connection timeout");
-            return false;
+            break;
         }
 
         Serial.print(".");
         delay(100);
     }
 
-    Serial.println();
-    Serial.print("[WIFI] Connected, IP=");
-    Serial.println(WiFi.localIP());
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.println();
+        Serial.print("[WIFI] Connected, IP=");
+        Serial.println(WiFi.localIP());
+        return true;
+    }
 
+    Serial.println();
+    Serial.println("[WIFI] Saved Wi-Fi not connected");
+
+    if (lastWiFiPortalTime != 0 && millis() - lastWiFiPortalTime < 300000)
+    {
+        Serial.println("[WIFI] Setup portal recently used; wait before reopening");
+        return false;
+    }
+
+    lastWiFiPortalTime = millis();
+
+    Serial.print("[WIFI] Starting setup portal AP=");
+    Serial.println(WIFI_SETUP_AP_NAME);
+    Serial.println("[WIFI] Connect phone to CASON-SETUP and open 192.168.4.1");
+
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(180);
+    wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_MS / 1000);
+    wm.setDebugOutput(false);
+
+    const bool ok = wm.autoConnect(
+        WIFI_SETUP_AP_NAME,
+        WIFI_SETUP_AP_PASSWORD
+    );
+
+    if (!ok)
+    {
+        Serial.println("[WIFI] Setup portal timeout or failed");
+        WiFi.mode(WIFI_STA);
+        return false;
+    }
+
+    Serial.print("[WIFI] Connected from setup portal, IP=");
+    Serial.println(WiFi.localIP());
     return true;
+}
+
+void resetWiFiSettings()
+{
+    Serial.println("[WIFI] Reset saved Wi-Fi settings");
+
+    WiFiManager wm;
+    wm.resetSettings();
+    WiFi.disconnect(true, true);
+    delay(500);
+
+    queueServerMessage(
+        "WIFI_RESET",
+        "NORMAL",
+        "ล้างค่า Wi-Fi เดิมแล้ว\nระบบจะรีสตาร์ทและเปิด CASON-SETUP ถ้าต่อ Wi-Fi ไม่ได้"
+    );
+
+    updateServerQueue();
+    delay(1000);
+    ESP.restart();
 }
 
 // =====================================================
@@ -944,6 +1005,10 @@ void processCommand(String command)
             buildSystemCheckMessage()
         );
     }
+    else if (command == "WIFI_RESET")
+    {
+        resetWiFiSettings();
+    }
     else if (command == "RAW")
     {
         printDI1Detail("[DI1]");
@@ -972,6 +1037,9 @@ void processCommand(String command)
         );
         Serial.println(
             "CHECK  - ตรวจระบบทั้งหมด"
+        );
+        Serial.println(
+            "WIFI_RESET - ล้างค่า Wi-Fi"
         );
         Serial.println(
             "RAW    - อ่านค่าดิบ DI1"
@@ -1128,6 +1196,12 @@ bool executeRemoteCommand(const String &command)
             "NORMAL",
             buildSystemCheckMessage()
         );
+        return true;
+    }
+
+    if (command == "WIFI_RESET")
+    {
+        resetWiFiSettings();
         return true;
     }
 
@@ -1581,7 +1655,7 @@ void setup()
     Serial.println("Ready.");
     Serial.println(
         "Type: TEST, ON, OFF, ALARM, RESET, "
-        "STATUS, CHECK, RAW, HELP"
+        "STATUS, CHECK, WIFI_RESET, RAW, HELP"
     );
 }
 
