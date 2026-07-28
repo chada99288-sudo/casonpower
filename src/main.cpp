@@ -91,6 +91,8 @@ uint32_t relayRestoreStartTime = 0;
 uint32_t lastHeartbeatTime = 0;
 uint32_t lastCommandPollTime = 0;
 uint32_t lastWiFiPortalTime = 0;
+bool wifiResetPending = false;
+uint32_t wifiResetRequestTime = 0;
 
 // คิวเหตุการณ์ที่จะส่ง LINE โดยตรง
 String pendingEvent;
@@ -393,21 +395,42 @@ bool connectWiFi()
 
 void resetWiFiSettings()
 {
-    Serial.println("[WIFI] Reset saved Wi-Fi settings");
+    if (wifiResetPending)
+    {
+        return;
+    }
+
+    Serial.println("[WIFI] Wi-Fi reset requested");
+
+    wifiResetPending = true;
+    wifiResetRequestTime = millis();
+
+    queueServerMessage(
+        "WIFI_RESET",
+        "NORMAL",
+        "รับคำสั่งล้างค่า Wi-Fi แล้ว\nระบบจะรีสตาร์ทและเปิด CASON-SETUP ถ้าต่อ Wi-Fi เดิมไม่ได้"
+    );
+}
+
+void updateWiFiReset()
+{
+    if (!wifiResetPending)
+    {
+        return;
+    }
+
+    if (millis() - wifiResetRequestTime < 5000)
+    {
+        return;
+    }
+
+    Serial.println("[WIFI] Reset saved Wi-Fi settings now");
 
     WiFiManager wm;
     wm.resetSettings();
     WiFi.disconnect(true, true);
     delay(500);
 
-    queueServerMessage(
-        "WIFI_RESET",
-        "NORMAL",
-        "ล้างค่า Wi-Fi เดิมแล้ว\nระบบจะรีสตาร์ทและเปิด CASON-SETUP ถ้าต่อ Wi-Fi ไม่ได้"
-    );
-
-    updateServerQueue();
-    delay(1000);
     ESP.restart();
 }
 
@@ -524,6 +547,7 @@ bool isImportantLineEvent(const String &eventName)
            eventName == "TRIP" ||
            eventName == "RECOVERY" ||
            eventName == "RESET" ||
+           eventName == "WIFI_RESET" ||
            eventName == "BOOT";
 }
 
@@ -1672,6 +1696,7 @@ void loop()
     updateAutoRestore();
     updateStatusIndicators("loop");
     updateServerQueue();
+    updateWiFiReset();
 
     delay(5);
 }
