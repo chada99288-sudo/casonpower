@@ -61,8 +61,8 @@ constexpr uint32_t DI1_DEBOUNCE_MS = 150;
 constexpr uint32_t RELAY_RESTORE_DELAY_MS = 30000;
 constexpr uint32_t HEARTBEAT_MS = 1000;
 constexpr uint32_t SERVER_RETRY_DELAY_MS = 30000;
-constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
-constexpr uint32_t HTTP_TIMEOUT_MS = 8000;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 3000;
+constexpr uint32_t HTTP_TIMEOUT_MS = 3000;
 
 // -----------------------------------------------------
 // ตัวแปรระบบ
@@ -91,8 +91,12 @@ uint32_t relayRestoreStartTime = 0;
 uint32_t lastHeartbeatTime = 0;
 uint32_t lastCommandPollTime = 0;
 uint32_t lastWiFiPortalTime = 0;
+uint32_t lastWiFiConnectAttemptTime = 0;
+bool wifiSetupPortalRunning = false;
 bool wifiResetPending = false;
 uint32_t wifiResetRequestTime = 0;
+
+WiFiManager wifiManager;
 
 // คิวเหตุการณ์ที่จะส่ง LINE โดยตรง
 String pendingEvent;
@@ -112,6 +116,7 @@ void showStatus();
 void queueServerMessage(const String &eventName, const String &statusName, const String &message);
 void updateServerQueue();
 void resetWiFiSettings();
+void updateWiFiPortal();
 String buildSystemCheckMessage();
 bool checkCommandServer();
 bool isRelayControllerOnline();
@@ -324,6 +329,12 @@ bool connectWiFi()
 {
     if (WiFi.status() == WL_CONNECTED)
     {
+        if (wifiSetupPortalRunning)
+        {
+            wifiManager.stopConfigPortal();
+            wifiSetupPortalRunning = false;
+            Serial.println("[WIFI] Setup portal stopped after connection");
+        }
         return true;
     }
 
@@ -332,65 +343,94 @@ bool connectWiFi()
     WiFi.persistent(true);
     WiFi.setSleep(false);
 
-    Serial.print("[WIFI] Connecting with saved credentials");
+    if (wifiSetupPortalRunning)
+    {
+        return false;
+    }
+
+    const uint32_t now = millis();
+    if (lastWiFiConnectAttemptTime != 0 && now - lastWiFiConnectAttemptTime < 10000)
+    {
+        return false;
+    }
+
+    lastWiFiConnectAttemptTime = now;
+
+    Serial.println("[WIFI] Trying saved credentials");
     WiFi.begin();
 
     const uint32_t startTime = millis();
-
-    while (WiFi.status() != WL_CONNECTED)
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < 500)
     {
-        if (millis() - startTime >= WIFI_CONNECT_TIMEOUT_MS)
-        {
-            break;
-        }
-
-        Serial.print(".");
-        delay(100);
+        delay(10);
     }
 
     if (WiFi.status() == WL_CONNECTED)
     {
-        Serial.println();
         Serial.print("[WIFI] Connected, IP=");
         Serial.println(WiFi.localIP());
         return true;
     }
 
-    Serial.println();
-    Serial.println("[WIFI] Saved Wi-Fi not connected");
-
-    if (lastWiFiPortalTime != 0 && millis() - lastWiFiPortalTime < 300000)
+    if (lastWiFiPortalTime != 0 && now - lastWiFiPortalTime < 300000)
     {
-        Serial.println("[WIFI] Setup portal recently used; wait before reopening");
+        Serial.println("[WIFI] Setup portal cooldown; safety loop continues");
         return false;
     }
 
-    lastWiFiPortalTime = millis();
+    lastWiFiPortalTime = now;
 
-    Serial.print("[WIFI] Starting setup portal AP=");
+    Serial.print("[WIFI] Starting non-blocking setup portal AP=");
     Serial.println(WIFI_SETUP_AP_NAME);
     Serial.println("[WIFI] Connect phone to CASON-SETUP and open 192.168.4.1");
 
-    WiFiManager wm;
-    wm.setConfigPortalTimeout(180);
-    wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_MS / 1000);
-    wm.setDebugOutput(false);
+    wifiManager.setConfigPortalBlocking(false);
+    wifiManager.setConfigPortalTimeout(180);
+    wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT_MS / 1000);
+    wifiManager.setDebugOutput(false);
 
-    const bool ok = wm.autoConnect(
+    const bool connected = wifiManager.autoConnect(
         WIFI_SETUP_AP_NAME,
         WIFI_SETUP_AP_PASSWORD
     );
 
-    if (!ok)
+    if (connected)
     {
-        Serial.println("[WIFI] Setup portal timeout or failed");
-        WiFi.mode(WIFI_STA);
-        return false;
+        Serial.print("[WIFI] Connected, IP=");
+        Serial.println(WiFi.localIP());
+        return true;
     }
 
-    Serial.print("[WIFI] Connected from setup portal, IP=");
-    Serial.println(WiFi.localIP());
-    return true;
+    wifiSetupPortalRunning = true;
+    Serial.println("[WIFI] Setup portal running; safety loop continues");
+    return false;
+}
+
+void updateWiFiPortal()
+{
+    if (!wifiSetupPortalRunning)
+    {
+        return;
+    }
+
+    wifiManager.process();
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        wifiManager.stopConfigPortal();
+        wifiSetupPortalRunning = false;
+        Serial.print("[WIFI] Connected from setup portal, IP=");
+        Serial.println(WiFi.localIP());
+        return;
+    }
+
+    if (millis() - lastWiFiPortalTime >= 180000)
+    {
+        wifiManager.stopConfigPortal();
+        wifiSetupPortalRunning = false;
+        WiFi.mode(WIFI_STA);
+        Serial.println("[WIFI] Setup portal timeout; safety loop continues");
+    }
 }
 
 void resetWiFiSettings()
@@ -426,8 +466,7 @@ void updateWiFiReset()
 
     Serial.println("[WIFI] Reset saved Wi-Fi settings now");
 
-    WiFiManager wm;
-    wm.resetSettings();
+    wifiManager.resetSettings();
     WiFi.disconnect(true, true);
     delay(500);
 
@@ -1690,11 +1729,12 @@ void setup()
 void loop()
 {
     updateSerial();
-    updateCommandPoll();
     updateDI1();
-    updateHeartbeat();
     updateAutoRestore();
     updateStatusIndicators("loop");
+    updateWiFiPortal();
+    updateCommandPoll();
+    updateHeartbeat();
     updateServerQueue();
     updateWiFiReset();
 
