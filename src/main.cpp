@@ -27,7 +27,7 @@ const char *LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
 // LINE Command Server / Webhook Bridge
 // LINE -> Webhook Server -> ESP32 polls commands
 // -----------------------------------------------------
-const char *COMMAND_SERVER_BASE_URL = "http://192.168.1.140:8080";
+const char *COMMAND_SERVER_BASE_URL = "https://casonpower.onrender.com";
 constexpr bool COMMAND_SERVER_ENABLED = true;
 constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 3000;
 
