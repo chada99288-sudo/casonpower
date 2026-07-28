@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: casonpower-line-command
+    runtime: python
+    plan: free
+    buildCommand: pip install -r src/requirements.txt
+    startCommand: python src/server.py
+    healthCheckPath: /health
+    envVars:
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: CASON_DUPLICATE_BLOCK_SECONDS
+        value: "300"

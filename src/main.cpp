@@ -1,0 +1,1436 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include "line_secret.h"
+
+// =====================================================
+// CASON SOLAR SAFETY CONTROLLER
+// ESP32 -> LINE DIRECT
+// RELAY CH1 + DIGITAL INPUT 1
+// =====================================================
+
+// -----------------------------------------------------
+// Wi-Fi
+// -----------------------------------------------------
+const char *WIFI_SSID = "Chubay_2.4G";
+const char *WIFI_PASSWORD = "Chubay2125";
+
+// -----------------------------------------------------
+// LINE Messaging API Direct
+// -----------------------------------------------------
+const char *LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
+
+// -----------------------------------------------------
+// LINE Command Server / Webhook Bridge
+// LINE -> Webhook Server -> ESP32 polls commands
+// -----------------------------------------------------
+const char *COMMAND_SERVER_BASE_URL = "http://192.168.1.140:8080";
+constexpr bool COMMAND_SERVER_ENABLED = true;
+constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 3000;
+
+// -----------------------------------------------------
+// Waveshare TCA9554 Relay Controller
+// -----------------------------------------------------
+constexpr uint8_t I2C_SDA_PIN = 42;
+constexpr uint8_t I2C_SCL_PIN = 41;
+constexpr uint8_t TCA9554_ADDRESS = 0x20;
+
+constexpr uint8_t TCA_OUTPUT_REG = 0x01;
+constexpr uint8_t TCA_POLARITY_REG = 0x02;
+constexpr uint8_t TCA_CONFIG_REG = 0x03;
+
+constexpr bool RELAY_ACTIVE_HIGH = true;
+
+constexpr uint8_t RELAY_CH1_POWER = 1;
+constexpr uint8_t RELAY_CH2_GREEN = 2;
+constexpr uint8_t RELAY_CH3_YELLOW = 3;
+constexpr uint8_t RELAY_CH4_RED = 4;
+
+// -----------------------------------------------------
+// Digital Input 1
+// -----------------------------------------------------
+constexpr uint8_t DI1_PIN = 4;
+constexpr uint8_t DI1_ACTIVE_LEVEL = LOW;
+constexpr uint8_t DI1_INPUT_MODE = INPUT_PULLUP;
+
+constexpr uint32_t DI1_DEBOUNCE_MS = 150;
+constexpr uint32_t RELAY_RESTORE_DELAY_MS = 30000;
+constexpr uint32_t HEARTBEAT_MS = 1000;
+constexpr uint32_t SERVER_RETRY_DELAY_MS = 30000;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
+constexpr uint32_t HTTP_TIMEOUT_MS = 8000;
+
+// -----------------------------------------------------
+// ตัวแปรระบบ
+// -----------------------------------------------------
+uint8_t relayOutput = 0x00;
+
+bool relay1On = false;
+bool alarmActive = false;
+
+bool di1Active = false;
+bool di1LastActiveState = false;
+bool relayRestorePending = false;
+
+enum IndicatorState
+{
+    INDICATOR_UNKNOWN,
+    INDICATOR_NORMAL,
+    INDICATOR_MINOR_FAULT,
+    INDICATOR_MAJOR_FAULT
+};
+
+IndicatorState currentIndicatorState = INDICATOR_UNKNOWN;
+
+uint32_t di1LastChangeTime = 0;
+uint32_t relayRestoreStartTime = 0;
+uint32_t lastHeartbeatTime = 0;
+uint32_t lastCommandPollTime = 0;
+
+// คิวเหตุการณ์ที่จะส่ง LINE โดยตรง
+String pendingEvent;
+String pendingStatus;
+String pendingMessage;
+
+bool serverMessagePending = false;
+uint32_t nextServerAttemptTime = 0;
+
+int readDI1Raw();
+bool readDI1();
+const char *di1StateText(bool active);
+void printDI1Detail(const char *prefix);
+void updateStatusIndicators(const char *reason);
+void processCommand(String command);
+void showStatus();
+bool isImportantLineEvent(const String &eventName);
+
+// =====================================================
+// TCA9554
+// =====================================================
+
+bool tcaWriteRegister(uint8_t reg, uint8_t value)
+{
+    Wire.beginTransmission(TCA9554_ADDRESS);
+    Wire.write(reg);
+    Wire.write(value);
+
+    const uint8_t result = Wire.endTransmission();
+
+    if (result != 0)
+    {
+        Serial.print("[I2C] Write failed, code=");
+        Serial.println(result);
+        return false;
+    }
+
+    return true;
+}
+
+bool tcaBegin()
+{
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(100000);
+
+    Wire.beginTransmission(TCA9554_ADDRESS);
+    const uint8_t result = Wire.endTransmission();
+
+    if (result != 0)
+    {
+        Serial.println("[TCA9554] NOT FOUND at 0x20");
+        return false;
+    }
+
+    Serial.println("[TCA9554] FOUND at 0x20");
+
+    if (!tcaWriteRegister(TCA_POLARITY_REG, 0x00))
+    {
+        return false;
+    }
+
+    // P0-P7 เป็น Output
+    if (!tcaWriteRegister(TCA_CONFIG_REG, 0x00))
+    {
+        return false;
+    }
+
+    // เริ่มต้นให้รีเลย์ทุกช่อง OFF
+    relayOutput = RELAY_ACTIVE_HIGH ? 0x00 : 0xFF;
+
+    if (!tcaWriteRegister(TCA_OUTPUT_REG, relayOutput))
+    {
+        return false;
+    }
+
+    relay1On = false;
+
+    Serial.println("[RELAY] All relays OFF");
+    return true;
+}
+
+// =====================================================
+// Relay
+// =====================================================
+
+bool setRelay(uint8_t channel, bool turnOn)
+{
+    if (channel < 1 || channel > 8)
+    {
+        Serial.println("[RELAY] Invalid channel");
+        return false;
+    }
+
+    const uint8_t bitMask = 1U << (channel - 1);
+    const bool outputHigh =
+        RELAY_ACTIVE_HIGH ? turnOn : !turnOn;
+
+    if (outputHigh)
+    {
+        relayOutput |= bitMask;
+    }
+    else
+    {
+        relayOutput &= static_cast<uint8_t>(~bitMask);
+    }
+
+    if (!tcaWriteRegister(TCA_OUTPUT_REG, relayOutput))
+    {
+        return false;
+    }
+
+    if (channel == 1)
+    {
+        relay1On = turnOn;
+    }
+
+    Serial.print("[RELAY] CH");
+    Serial.print(channel);
+    Serial.println(turnOn ? " ON" : " OFF");
+
+    return true;
+}
+
+const char *indicatorStateText(IndicatorState state)
+{
+    switch (state)
+    {
+    case INDICATOR_NORMAL:
+        return "NORMAL_GREEN";
+    case INDICATOR_MINOR_FAULT:
+        return "MINOR_YELLOW";
+    case INDICATOR_MAJOR_FAULT:
+        return "MAJOR_RED";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+bool setIndicatorRelays(
+    bool greenOn,
+    bool yellowOn,
+    bool redOn)
+{
+    bool ok = true;
+
+    ok &= setRelay(RELAY_CH2_GREEN, greenOn);
+    ok &= setRelay(RELAY_CH3_YELLOW, yellowOn);
+    ok &= setRelay(RELAY_CH4_RED, redOn);
+
+    return ok;
+}
+
+void updateStatusIndicators(const char *reason)
+{
+    IndicatorState nextState = INDICATOR_NORMAL;
+
+    if (di1Active || readDI1())
+    {
+        nextState = INDICATOR_MAJOR_FAULT;
+    }
+    else if (alarmActive || relayRestorePending ||
+             serverMessagePending ||
+             WiFi.status() != WL_CONNECTED)
+    {
+        nextState = INDICATOR_MINOR_FAULT;
+    }
+
+    if (nextState == currentIndicatorState)
+    {
+        return;
+    }
+
+    currentIndicatorState = nextState;
+
+    Serial.print("[STATUS-LIGHT] ");
+    Serial.print(indicatorStateText(currentIndicatorState));
+    Serial.print(" reason=");
+    Serial.println(reason);
+
+    setIndicatorRelays(
+        currentIndicatorState == INDICATOR_NORMAL,
+        currentIndicatorState == INDICATOR_MINOR_FAULT,
+        currentIndicatorState == INDICATOR_MAJOR_FAULT
+    );
+}
+
+// =====================================================
+// Wi-Fi
+// =====================================================
+
+bool connectWiFi()
+{
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        return true;
+    }
+
+    Serial.print("[WIFI] Connecting");
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);
+    WiFi.setSleep(false);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    const uint32_t startTime = millis();
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        if (millis() - startTime >= WIFI_CONNECT_TIMEOUT_MS)
+        {
+            Serial.println();
+            Serial.println("[WIFI] Connection timeout");
+            return false;
+        }
+
+        Serial.print(".");
+        delay(100);
+    }
+
+    Serial.println();
+    Serial.print("[WIFI] Connected, IP=");
+    Serial.println(WiFi.localIP());
+
+    return true;
+}
+
+// =====================================================
+// LINE Direct
+// =====================================================
+
+String buildLinePayload(const String &message)
+{
+    JsonDocument document;
+
+    document["to"] = LINE_USER_ID;
+
+    JsonArray messages = document["messages"].to<JsonArray>();
+    JsonObject textMessage = messages.add<JsonObject>();
+    textMessage["type"] = "text";
+    textMessage["text"] = message;
+
+    String payload;
+    serializeJson(document, payload);
+
+    return payload;
+}
+
+String buildLineText(
+    const String &eventName,
+    const String &statusName,
+    const String &message)
+{
+    String text;
+    text += "CASON Solar Safety Controller\n";
+    text += "Event: " + eventName + "\n";
+    text += "Status: " + statusName + "\n";
+    text += message + "\n";
+    text += "DI1 RAW: " + String(readDI1Raw()) + "\n";
+    text += "DI1: " + String(di1StateText(di1Active)) + "\n";
+    text += "Relay CH1: " + String(relay1On ? "ON" : "OFF") + "\n";
+    text += "Alarm: " + String(alarmActive ? "ACTIVE" : "NORMAL") + "\n";
+    text += "Uptime: " + String(millis() / 1000) + " วินาที";
+
+    return text;
+}
+
+bool sendEventToLine(
+    const String &eventName,
+    const String &statusName,
+    const String &message)
+{
+    if (!connectWiFi())
+    {
+        Serial.println("[LINE-DIRECT] Wi-Fi not connected");
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+
+    Serial.print("[LINE-DIRECT] POST ");
+    Serial.println(LINE_PUSH_URL);
+
+    if (!http.begin(client, LINE_PUSH_URL))
+    {
+        Serial.println("[LINE-DIRECT] http.begin failed");
+        return false;
+    }
+
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader(
+        "Authorization",
+        String("Bearer ") + LINE_CHANNEL_ACCESS_TOKEN
+    );
+    http.addHeader("Connection", "close");
+
+    const String lineText =
+        buildLineText(eventName, statusName, message);
+    const String payload = buildLinePayload(lineText);
+
+    Serial.print("[LINE-DIRECT] Event=");
+    Serial.println(eventName);
+
+    const int httpCode = http.POST(payload);
+    const String response = http.getString();
+
+    Serial.print("[LINE-DIRECT] HTTP=");
+    Serial.println(httpCode);
+
+    if (response.length() > 0)
+    {
+        Serial.print("[LINE-DIRECT] Response=");
+        Serial.println(response);
+    }
+
+    http.end();
+
+    return httpCode >= 200 && httpCode < 300;
+}
+
+bool sendEventToServer(
+    const String &eventName,
+    const String &statusName,
+    const String &message)
+{
+    return sendEventToLine(eventName, statusName, message);
+}
+
+bool isImportantLineEvent(const String &eventName)
+{
+    return eventName == "FAULT" ||
+           eventName == "ALARM" ||
+           eventName == "TRIP" ||
+           eventName == "RECOVERY" ||
+           eventName == "RESET" ||
+           eventName == "BOOT";
+}
+
+void queueServerMessage(
+    const String &eventName,
+    const String &statusName,
+    const String &message)
+{
+    if (serverMessagePending &&
+        isImportantLineEvent(pendingEvent) &&
+        !isImportantLineEvent(eventName))
+    {
+        Serial.print("[LINE-DIRECT] Drop non-critical event while important event pending: ");
+        Serial.println(eventName);
+        return;
+    }
+
+    if (serverMessagePending)
+    {
+        Serial.print("[LINE-DIRECT] Replace pending event ");
+        Serial.print(pendingEvent);
+        Serial.print(" with ");
+        Serial.println(eventName);
+    }
+
+    pendingEvent = eventName;
+    pendingStatus = statusName;
+    pendingMessage = message;
+
+    serverMessagePending = true;
+    nextServerAttemptTime = millis();
+
+    Serial.print("[LINE-DIRECT] Queued event: ");
+    Serial.println(eventName);
+
+    updateStatusIndicators("line_queue_pending");
+}
+
+void updateServerQueue()
+{
+    if (!serverMessagePending)
+    {
+        return;
+    }
+
+    if (static_cast<int32_t>(
+            millis() - nextServerAttemptTime) < 0)
+    {
+        return;
+    }
+
+    Serial.println(
+        "[LINE-DIRECT] Sending queued event..."
+    );
+
+    if (sendEventToServer(
+            pendingEvent,
+            pendingStatus,
+            pendingMessage))
+    {
+        serverMessagePending = false;
+
+        pendingEvent = "";
+        pendingStatus = "";
+        pendingMessage = "";
+
+        Serial.println("[LINE-DIRECT] Queue cleared");
+        updateStatusIndicators("line_queue_cleared");
+    }
+    else
+    {
+        nextServerAttemptTime =
+            millis() + SERVER_RETRY_DELAY_MS;
+
+        Serial.println(
+            "[LINE-DIRECT] Send failed; "
+            "retry in 30 seconds"
+        );
+        updateStatusIndicators("line_queue_retry");
+    }
+}
+
+// =====================================================
+// DI1
+// =====================================================
+
+int readDI1Raw()
+{
+    return digitalRead(DI1_PIN);
+}
+
+bool readDI1()
+{
+    return readDI1Raw() == DI1_ACTIVE_LEVEL;
+}
+
+const char *di1StateText(bool active)
+{
+    return active ? "ACTIVE" : "NORMAL";
+}
+
+void printDI1Detail(const char *prefix)
+{
+    const int rawValue = readDI1Raw();
+    const bool active = rawValue == DI1_ACTIVE_LEVEL;
+
+    Serial.print(prefix);
+    Serial.print(" GPIO");
+    Serial.print(DI1_PIN);
+    Serial.print(" RAW=");
+    Serial.print(rawValue);
+    Serial.print(" STATUS=");
+    Serial.println(di1StateText(active));
+}
+
+void activateDI1Alarm()
+{
+    relayRestorePending = false;
+
+    if (alarmActive)
+    {
+        updateStatusIndicators("alarm_active");
+        return;
+    }
+
+    alarmActive = true;
+
+    Serial.println();
+    Serial.println(
+        "======================================"
+    );
+    Serial.println(
+        "[ALARM] DIGITAL INPUT 1 ACTIVE"
+    );
+    Serial.println(
+        "[ALARM] Cutting Relay CH1"
+    );
+    Serial.println(
+        "======================================"
+    );
+
+    // ตัดรีเลย์ก่อนทำงานด้านเครือข่าย
+    setRelay(1, false);
+
+    queueServerMessage(
+        "FAULT",
+        "ACTIVE",
+        "ตรวจพบสัญญาณผิดปกติจาก Digital Input 1\n"
+        "Relay CH1 ถูกสั่ง OFF\n"
+        "ระบบถูกตัดเพื่อความปลอดภัย"
+    );
+
+    updateStatusIndicators("di1_alarm");
+}
+
+void updateDI1()
+{
+    const bool activeState = readDI1();
+
+    if (activeState != di1LastActiveState)
+    {
+        di1LastActiveState = activeState;
+        di1LastChangeTime = millis();
+    }
+
+    if (millis() - di1LastChangeTime <
+        DI1_DEBOUNCE_MS)
+    {
+        return;
+    }
+
+    if (activeState == di1Active)
+    {
+        return;
+    }
+
+    di1Active = activeState;
+
+    Serial.print("[DI1] ");
+    Serial.println(
+        di1StateText(di1Active)
+    );
+
+    if (di1Active)
+    {
+        activateDI1Alarm();
+    }
+    else
+    {
+        Serial.println(
+            "[DI1] Signal returned to normal"
+        );
+        Serial.println(
+            "[SYSTEM] Relay CH1 restore pending for 30 seconds"
+        );
+
+        relayRestorePending = true;
+        relayRestoreStartTime = millis();
+        updateStatusIndicators("restore_pending");
+    }
+}
+
+void updateAutoRestore()
+{
+    if (!relayRestorePending)
+    {
+        return;
+    }
+
+    if (di1Active || readDI1())
+    {
+        relayRestorePending = false;
+        Serial.println(
+            "[SYSTEM] Auto restore canceled: DI1 active again"
+        );
+        return;
+    }
+
+    if (millis() - relayRestoreStartTime <
+        RELAY_RESTORE_DELAY_MS)
+    {
+        return;
+    }
+
+    relayRestorePending = false;
+    alarmActive = false;
+
+    Serial.println(
+        "[SYSTEM] Restore delay complete"
+    );
+    Serial.println(
+        "[SYSTEM] Auto restoring Relay CH1"
+    );
+
+    const String recoveryStamp =
+        String("\nUptime: ") + String(millis() / 1000) +
+        " วินาที";
+
+    if (setRelay(1, true))
+    {
+        Serial.println(
+            "[LINE-DIRECT] Queuing RECOVERY after restore delay"
+        );
+        const String recoveryMessage =
+            String("Digital Input 1 กลับสู่สถานะปกติครบ 30 วินาทีแล้ว\n") +
+            "Relay CH1 ถูกสั่ง ON อัตโนมัติ\n" +
+            "ระบบกลับมาทำงานตามปกติ" +
+            recoveryStamp;
+
+        queueServerMessage(
+            "RECOVERY",
+            "NORMAL",
+            recoveryMessage
+        );
+    }
+    else
+    {
+        const String recoveryMessage =
+            String("Digital Input 1 กลับสู่สถานะปกติครบ 30 วินาทีแล้ว\n") +
+            "แต่สั่ง Relay CH1 ON ไม่สำเร็จ\n" +
+            "กรุณาตรวจสอบ Relay Controller" +
+            recoveryStamp;
+
+        queueServerMessage(
+            "RECOVERY",
+            "NORMAL",
+            recoveryMessage
+        );
+    }
+}
+
+// =====================================================
+// Status
+// =====================================================
+
+void showStatus()
+{
+    Serial.println();
+    Serial.println(
+        "========== SYSTEM STATUS =========="
+    );
+
+    Serial.print("Wi-Fi       : ");
+    Serial.println(
+        WiFi.status() == WL_CONNECTED
+            ? "CONNECTED"
+            : "DISCONNECTED"
+    );
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.print("ESP32 IP    : ");
+        Serial.println(WiFi.localIP());
+    }
+
+    Serial.print("LINE Direct : ");
+    Serial.println(LINE_PUSH_URL);
+
+    Serial.print("Command Srv : ");
+    Serial.println(COMMAND_SERVER_BASE_URL);
+
+    Serial.print("DI1 Logic   : NORMAL=1, ACTIVE=0");
+    Serial.println();
+
+    Serial.print("DI1 RAW     : ");
+    Serial.println(readDI1Raw());
+
+    Serial.print("DI1         : ");
+    Serial.println(
+        di1StateText(di1Active)
+    );
+
+    Serial.print("Relay CH1   : ");
+    Serial.println(
+        relay1On ? "ON" : "OFF"
+    );
+
+    Serial.print("Alarm       : ");
+    Serial.println(
+        alarmActive
+            ? "ACTIVE"
+            : "NORMAL"
+    );
+
+    Serial.print("Restore     : ");
+    Serial.println(
+        relayRestorePending
+            ? "PENDING"
+            : "IDLE"
+    );
+
+    Serial.print("Status Light: ");
+    Serial.println(
+        indicatorStateText(currentIndicatorState)
+    );
+
+    Serial.print("LINE Queue  : ");
+    Serial.println(
+        serverMessagePending
+            ? "PENDING"
+            : "EMPTY"
+    );
+
+    Serial.print("Free Heap   : ");
+    Serial.println(ESP.getFreeHeap());
+
+    Serial.println(
+        "==================================="
+    );
+}
+
+// =====================================================
+// Serial Commands
+// =====================================================
+
+void processCommand(String command)
+{
+    command.trim();
+    command.toUpperCase();
+
+    if (command.length() == 0)
+    {
+        return;
+    }
+
+    Serial.print("[COMMAND] ");
+    Serial.println(command);
+
+    if (command == "ON")
+    {
+        if (alarmActive || di1Active)
+        {
+            Serial.println(
+                "[ON] Refused: Alarm/DI1 active"
+            );
+            return;
+        }
+
+        if (setRelay(1, true))
+        {
+            queueServerMessage(
+                "RELAY_ON",
+                "ACTIVE",
+                "Relay CH1 ถูกสั่ง ON"
+            );
+        }
+    }
+    else if (command == "OFF")
+    {
+        if (setRelay(1, false))
+        {
+            queueServerMessage(
+                "RELAY_OFF",
+                "ACTIVE",
+                "Relay CH1 ถูกสั่ง OFF"
+            );
+        }
+    }
+    else if (command == "ALARM")
+    {
+        activateDI1Alarm();
+    }
+    else if (command == "RESET")
+    {
+        if (!alarmActive)
+        {
+            Serial.println(
+                "[RESET] No active alarm"
+            );
+            return;
+        }
+
+        if (di1Active || readDI1())
+        {
+            Serial.println(
+                "[RESET] Refused: "
+                "DI1 still ACTIVE"
+            );
+            return;
+        }
+
+        alarmActive = false;
+
+        Serial.println(
+            "[RESET] Alarm cleared"
+        );
+
+        if (setRelay(1, true))
+        {
+            queueServerMessage(
+                "RESET",
+                "NORMAL",
+                "Alarm ถูกรีเซ็ตแล้ว\n"
+                "Relay CH1 ถูกสั่ง ON\n"
+                "ระบบกลับมาทำงานตามปกติ"
+            );
+        }
+    }
+    else if (command == "TEST")
+    {
+        queueServerMessage(
+            "TEST",
+            "ACTIVE",
+            "ตรวจสอบการเชื่อมต่อ LINE สำเร็จ"
+        );
+
+        Serial.println(
+            "[TEST] LINE message queued"
+        );
+    }
+    else if (command == "STATUS")
+    {
+        showStatus();
+    }
+    else if (command == "RAW")
+    {
+        printDI1Detail("[DI1]");
+    }
+    else if (command == "HELP")
+    {
+        Serial.println();
+        Serial.println("Commands:");
+        Serial.println(
+            "ON     - เปิด Relay CH1"
+        );
+        Serial.println(
+            "OFF    - ปิด Relay CH1"
+        );
+        Serial.println(
+            "ALARM  - จำลอง Alarm"
+        );
+        Serial.println(
+            "RESET  - รีเซ็ตระบบ"
+        );
+        Serial.println(
+            "TEST   - ตรวจสอบส่ง LINE"
+        );
+        Serial.println(
+            "STATUS - แสดงสถานะ"
+        );
+        Serial.println(
+            "RAW    - อ่านค่าดิบ DI1"
+        );
+        Serial.println(
+            "HELP   - แสดงคำสั่ง"
+        );
+    }
+    else
+    {
+        Serial.println(
+            "[COMMAND] Unknown command"
+        );
+        Serial.println("Type HELP");
+    }
+}
+
+String buildStatusMessage()
+{
+    String message;
+    message += "สถานะระบบล่าสุด\n";
+    message += "Wi-Fi: ";
+    message += WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED";
+    message += "\nDI1 RAW: " + String(readDI1Raw());
+    message += "\nDI1: " + String(di1StateText(di1Active));
+    message += "\nRelay CH1: ";
+    message += relay1On ? "ON" : "OFF";
+    message += "\nAlarm: ";
+    message += alarmActive ? "ACTIVE" : "NORMAL";
+    message += "\nRestore: ";
+    message += relayRestorePending ? "PENDING" : "IDLE";
+    message += "\nStatus Light: ";
+    message += indicatorStateText(currentIndicatorState);
+    message += "\nLINE Queue: ";
+    message += serverMessagePending ? "PENDING" : "EMPTY";
+    message += "\nUptime: " + String(millis() / 1000) + " วินาที";
+
+    return message;
+}
+
+bool executeRemoteCommand(const String &command)
+{
+    Serial.print("[REMOTE-COMMAND] ");
+    Serial.println(command);
+
+    if (command == "STATUS")
+    {
+        showStatus();
+        queueServerMessage(
+            "STATUS",
+            "NORMAL",
+            buildStatusMessage()
+        );
+        return true;
+    }
+
+    if (command == "TEST")
+    {
+        queueServerMessage(
+            "TEST",
+            "ACTIVE",
+            "ตรวจสอบการเชื่อมต่อ LINE สำเร็จ"
+        );
+        return true;
+    }
+
+    if (command == "ON")
+    {
+        if (alarmActive || di1Active || readDI1())
+        {
+            queueServerMessage(
+                "COMMAND_REFUSED",
+                "ACTIVE",
+                "คำสั่ง ON ถูกปฏิเสธ\nระบบยังมี Alarm หรือ DI1 ยังผิดปกติ"
+            );
+            return false;
+        }
+
+        if (setRelay(1, true))
+        {
+            queueServerMessage(
+                "RELAY_ON",
+                "ACTIVE",
+                "Relay CH1 ถูกสั่ง ON ผ่าน LINE"
+            );
+            return true;
+        }
+
+        queueServerMessage(
+            "COMMAND_FAILED",
+            "ACTIVE",
+            "สั่ง Relay CH1 ON ผ่าน LINE ไม่สำเร็จ"
+        );
+        return false;
+    }
+
+    if (command == "OFF")
+    {
+        if (setRelay(1, false))
+        {
+            queueServerMessage(
+                "RELAY_OFF",
+                "ACTIVE",
+                "Relay CH1 ถูกสั่ง OFF ผ่าน LINE"
+            );
+            return true;
+        }
+
+        queueServerMessage(
+            "COMMAND_FAILED",
+            "ACTIVE",
+            "สั่ง Relay CH1 OFF ผ่าน LINE ไม่สำเร็จ"
+        );
+        return false;
+    }
+
+    if (command == "RESET")
+    {
+        if (!alarmActive)
+        {
+            queueServerMessage(
+                "RESET",
+                "NORMAL",
+                "ไม่มี Alarm ค้างอยู่\nระบบอยู่ในสถานะปกติแล้ว"
+            );
+            return true;
+        }
+
+        if (di1Active || readDI1())
+        {
+            queueServerMessage(
+                "COMMAND_REFUSED",
+                "ACTIVE",
+                "คำสั่ง RESET ถูกปฏิเสธ\nDI1 ยังผิดปกติอยู่"
+            );
+            return false;
+        }
+
+        alarmActive = false;
+
+        if (setRelay(1, true))
+        {
+            queueServerMessage(
+                "RESET",
+                "NORMAL",
+                "Alarm ถูกรีเซ็ตผ่าน LINE\nRelay CH1 ถูกสั่ง ON\nระบบกลับมาทำงานตามปกติ"
+            );
+            return true;
+        }
+
+        queueServerMessage(
+            "COMMAND_FAILED",
+            "ACTIVE",
+            "รีเซ็ต Alarm ผ่าน LINE แล้ว\nแต่สั่ง Relay CH1 ON ไม่สำเร็จ"
+        );
+        return false;
+    }
+
+    return false;
+}
+
+bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url)
+{
+    if (url.startsWith("https://"))
+    {
+        secureClient.setInsecure();
+        return http.begin(secureClient, url);
+    }
+
+    return http.begin(plainClient, url);
+}
+
+void postCommandResult(
+    const String &commandId,
+    const String &command,
+    bool ok,
+    const String &detail)
+{
+    if (!COMMAND_SERVER_ENABLED || strlen(COMMAND_SERVER_BASE_URL) == 0)
+    {
+        return;
+    }
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        return;
+    }
+
+    String url = COMMAND_SERVER_BASE_URL;
+    url += "/api/command/result";
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    HTTPClient http;
+
+    if (!httpBeginForURL(http, plainClient, secureClient, url))
+    {
+        Serial.println("[COMMAND-POLL] result http.begin failed");
+        return;
+    }
+
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");
+
+    JsonDocument document;
+    document["id"] = commandId;
+    document["command"] = command;
+    document["ok"] = ok;
+    document["detail"] = detail;
+    document["device"] = "CASON-ESP32-01";
+    document["uptime_seconds"] = millis() / 1000;
+
+    String payload;
+    serializeJson(document, payload);
+
+    const int code = http.POST(payload);
+    Serial.print("[COMMAND-POLL] result HTTP=");
+    Serial.println(code);
+
+    http.end();
+}
+
+void updateCommandPoll()
+{
+    if (!COMMAND_SERVER_ENABLED || strlen(COMMAND_SERVER_BASE_URL) == 0)
+    {
+        return;
+    }
+
+    if (millis() - lastCommandPollTime < COMMAND_POLL_INTERVAL_MS)
+    {
+        return;
+    }
+
+    lastCommandPollTime = millis();
+
+    if (!connectWiFi())
+    {
+        Serial.println("[COMMAND-POLL] Wi-Fi not connected");
+        return;
+    }
+
+    String url = COMMAND_SERVER_BASE_URL;
+    url += "/api/command?device=CASON-ESP32-01";
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    HTTPClient http;
+
+    if (!httpBeginForURL(http, plainClient, secureClient, url))
+    {
+        Serial.println("[COMMAND-POLL] http.begin failed");
+        return;
+    }
+
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.addHeader("Connection", "close");
+
+    const int code = http.GET();
+    const String response = http.getString();
+    http.end();
+
+    if (code < 200 || code >= 300)
+    {
+        Serial.print("[COMMAND-POLL] HTTP=");
+        Serial.println(code);
+        return;
+    }
+
+    JsonDocument document;
+    DeserializationError error = deserializeJson(document, response);
+
+    if (error)
+    {
+        Serial.print("[COMMAND-POLL] JSON error=");
+        Serial.println(error.c_str());
+        return;
+    }
+
+    const String command = String(document["command"] | "");
+
+    if (command.length() == 0)
+    {
+        return;
+    }
+
+    const String commandId = String(document["id"] | "");
+    const bool ok = executeRemoteCommand(command);
+
+    postCommandResult(
+        commandId,
+        command,
+        ok,
+        ok ? "executed" : "refused_or_failed"
+    );
+}
+
+void updateSerial()
+{
+    static String commandBuffer;
+
+    while (Serial.available() > 0)
+    {
+        const char c =
+            static_cast<char>(Serial.read());
+
+        if (c == '\n' || c == '\r')
+        {
+            if (commandBuffer.length() > 0)
+            {
+                processCommand(commandBuffer);
+                commandBuffer = "";
+            }
+        }
+        else if (commandBuffer.length() < 64)
+        {
+            commandBuffer += c;
+        }
+        else
+        {
+            commandBuffer = "";
+
+            Serial.println(
+                "[COMMAND] Input too long; cleared"
+            );
+        }
+    }
+}
+
+// =====================================================
+// Heartbeat
+// =====================================================
+
+void updateHeartbeat()
+{
+    if (millis() - lastHeartbeatTime <
+        HEARTBEAT_MS)
+    {
+        return;
+    }
+
+    lastHeartbeatTime = millis();
+
+    Serial.print("[RUN] DI1_RAW=");
+    Serial.print(readDI1Raw());
+
+    Serial.print(" DI1=");
+    Serial.print(
+        di1StateText(di1Active)
+    );
+
+    Serial.print(" ALARM=");
+    Serial.print(
+        alarmActive ? "ACTIVE" : "NORMAL"
+    );
+
+    Serial.print(" RESTORE=");
+    Serial.print(
+        relayRestorePending ? "PENDING" : "IDLE"
+    );
+
+    Serial.print(" WIFI=");
+    Serial.print(
+        WiFi.status() == WL_CONNECTED
+            ? "CONNECTED"
+            : "DISCONNECTED"
+    );
+
+    Serial.print(" LINE_QUEUE=");
+    Serial.println(
+        serverMessagePending
+            ? "PENDING"
+            : "EMPTY"
+    );
+}
+
+// =====================================================
+// Setup
+// =====================================================
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(2500);
+
+    Serial.println();
+    Serial.println(
+        "======================================"
+    );
+    Serial.println(
+        "   CASON SOLAR SAFETY CONTROLLER"
+    );
+    Serial.println(
+        "     ESP32 -> LINE DIRECT"
+    );
+    Serial.println(
+        "======================================"
+    );
+
+    // DI1 เป็น Active LOW:
+    // ปกติ = HIGH (1), ผิดปกติ = LOW (0)
+    pinMode(DI1_PIN, DI1_INPUT_MODE);
+
+    di1LastActiveState = readDI1();
+    di1Active = di1LastActiveState;
+    di1LastChangeTime = millis();
+
+    printDI1Detail("[DI1] Startup");
+
+    if (!tcaBegin())
+    {
+        Serial.println(
+            "[SYSTEM] Relay controller FAILED"
+        );
+
+        // หยุดอยู่ตรงนี้เพื่อความปลอดภัย
+        while (true)
+        {
+            updateSerial();
+            delay(100);
+        }
+    }
+
+    // Fail-safe:
+    // ถ้า DI1 ปกติ ให้เปิด Relay CH1
+    // ถ้า DI1 ผิดปกติตั้งแต่เปิดเครื่อง ให้ Relay CH1 คง OFF
+    if (di1Active)
+    {
+        alarmActive = true;
+        setRelay(1, false);
+
+        Serial.println();
+        Serial.println(
+            "======================================"
+        );
+        Serial.println(
+            "[ALARM] DI1 ACTIVE AT STARTUP"
+        );
+        Serial.println(
+            "[ALARM] Relay CH1 remains OFF"
+        );
+        Serial.println(
+            "======================================"
+        );
+    }
+    else
+    {
+        alarmActive = false;
+
+        if (!setRelay(1, true))
+        {
+            Serial.println(
+                "[SYSTEM] Failed to turn Relay CH1 ON"
+            );
+        }
+    }
+
+    const bool wifiConnected = connectWiFi();
+
+    if (wifiConnected)
+    {
+        Serial.println(
+            "[SYSTEM] Wi-Fi ready"
+        );
+    }
+    else
+    {
+        Serial.println(
+            "[SYSTEM] Wi-Fi not ready"
+        );
+        Serial.println(
+            "[SYSTEM] LINE queue will retry"
+        );
+    }
+
+    // ส่งเหตุการณ์ตามสถานะจริงตอนเปิดเครื่อง
+    if (di1Active)
+    {
+        queueServerMessage(
+            "FAULT",
+            "ACTIVE",
+            "ตรวจพบ Digital Input 1 ผิดปกติตั้งแต่เปิดเครื่อง\n"
+            "Relay CH1 คงสถานะ OFF\n"
+            "ระบบถูกล็อกเพื่อความปลอดภัย"
+        );
+    }
+    else
+    {
+        queueServerMessage(
+            "BOOT",
+            "NORMAL",
+            "CASON Solar Safety Controller\n"
+            "ESP32 เปิดเครื่องเรียบร้อย\n"
+            "Digital Input 1 ปกติ\n"
+            "Relay CH1 ถูกสั่ง ON\n"
+            "ระบบกำลังทำงาน"
+        );
+    }
+
+    Serial.println();
+    Serial.println("Ready.");
+    Serial.println(
+        "Type: TEST, ON, OFF, ALARM, RESET, "
+        "STATUS, RAW, HELP"
+    );
+}
+
+// =====================================================
+// Loop
+// =====================================================
+
+void loop()
+{
+    updateSerial();
+    updateCommandPoll();
+    updateDI1();
+    updateHeartbeat();
+    updateAutoRestore();
+    updateStatusIndicators("loop");
+    updateServerQueue();
+
+    delay(5);
+}
