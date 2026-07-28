@@ -544,6 +544,23 @@ void printDI1Detail(const char *prefix)
     Serial.println(di1StateText(active));
 }
 
+
+void startRelayRestoreDelay(const char *reason)
+{
+    if (relayRestorePending)
+    {
+        return;
+    }
+
+    relayRestorePending = true;
+    relayRestoreStartTime = millis();
+
+    Serial.print("[SYSTEM] Relay CH1 restore pending for 30 seconds reason=");
+    Serial.println(reason);
+
+    updateStatusIndicators("restore_pending");
+}
+
 void activateDI1Alarm()
 {
     relayRestorePending = false;
@@ -621,13 +638,7 @@ void updateDI1()
         Serial.println(
             "[DI1] Signal returned to normal"
         );
-        Serial.println(
-            "[SYSTEM] Relay CH1 restore pending for 30 seconds"
-        );
-
-        relayRestorePending = true;
-        relayRestoreStartTime = millis();
-        updateStatusIndicators("restore_pending");
+        startRelayRestoreDelay("di1_normal");
     }
 }
 
@@ -635,7 +646,14 @@ void updateAutoRestore()
 {
     if (!relayRestorePending)
     {
-        return;
+        if (alarmActive && !relay1On && !di1Active && !readDI1())
+        {
+            startRelayRestoreDelay("alarm_waiting_with_di1_normal");
+        }
+        else
+        {
+            return;
+        }
     }
 
     if (di1Active || readDI1())
