@@ -577,7 +577,7 @@ bool sendEventToLine(
     return httpCode >= 200 && httpCode < 300;
 }
 
-bool sendEventToServer(
+bool sendQueuedEventToLine(
     const String &eventName,
     const String &statusName,
     const String &message)
@@ -648,7 +648,7 @@ void updateServerQueue()
         "[LINE-DIRECT] Sending queued event..."
     );
 
-    if (sendEventToServer(
+    if (sendQueuedEventToLine(
             pendingEvent,
             pendingStatus,
             pendingMessage))

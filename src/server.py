@@ -366,33 +366,6 @@ def pop_inflight_command(command_id):
 
     return command
 
-def build_command_result_message(command, ok, detail):
-    command = str(command or "").upper()
-    detail = str(detail or "")
-
-    status_text = "สำเร็จ" if ok else "ไม่สำเร็จ"
-    action_text = {
-        "STATUS": "ดูสถานะระบบ",
-        "TEST": "ทดสอบระบบ",
-        "ON": "เปิด Relay CH1",
-        "OFF": "ปิด Relay CH1",
-        "RESET": "รีเซ็ต Alarm",
-        "CHECK": "ตรวจระบบทั้งหมด",
-        "WIFI_RESET": "ล้างค่า Wi-Fi",
-    }.get(command, command or "ไม่ทราบคำสั่ง")
-
-    lines = [
-        "ผลการทำงานจาก ESP32",
-        f"คำสั่ง: {action_text}",
-        f"สถานะ: {status_text}",
-    ]
-
-    if detail and detail not in {"executed", "refused_or_failed"}:
-        lines.append(f"รายละเอียด: {detail}")
-
-    return "\n".join(lines)
-
-
 def is_authorized_command_user(user_id):
     return bool(user_id) and user_id in set(load_users())
 
