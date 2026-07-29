@@ -668,25 +668,38 @@ def save_heartbeat_status(status):
     write_json_file(HEARTBEAT_FILE, status)
 
 
-def heartbeat_seen(status=None):
+def heartbeat_last_seen(status=None):
     status = status or load_heartbeat_status()
-    return float(status.get("last_seen", 0) or 0) > 0
+    return float(status.get("last_seen", 0) or 0)
+
+
+def heartbeat_is_current(status=None):
+    return heartbeat_last_seen(status) >= SERVER_START_TIME
+
+
+def heartbeat_seen(status=None):
+    return heartbeat_is_current(status)
 
 
 def heartbeat_age_seconds(status=None):
     status = status or load_heartbeat_status()
-    last_seen = float(status.get("last_seen", 0) or 0)
-    baseline = last_seen if last_seen > 0 else SERVER_START_TIME
-    return max(0, int(time.time() - baseline))
+
+    if not heartbeat_is_current(status):
+        return None
+
+    return max(0, int(time.time() - heartbeat_last_seen(status)))
 
 
 def watchdog_state(status=None):
     status = status or load_heartbeat_status()
+
+    if not heartbeat_is_current(status):
+        return "WAITING_FOR_FIRST_HEARTBEAT"
+
     if bool(status.get("offline_notified")):
         return "OFFLINE_NOTIFIED"
-    if heartbeat_seen(status):
-        return "ONLINE"
-    return "WAITING_FOR_FIRST_HEARTBEAT"
+
+    return "ONLINE"
 
 
 def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
@@ -711,6 +724,8 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
             for key in (
                 "di1_raw",
                 "di1_active",
+                "di2_raw",
+                "di2_active",
                 "relay1",
                 "relay1_on",
                 "alarm_active",
@@ -747,18 +762,36 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
 
 def check_heartbeat_watchdog():
     status = load_heartbeat_status()
-    last_seen = float(status.get("last_seen", 0) or 0)
+    last_seen = heartbeat_last_seen(status)
 
     now = time.time()
-    baseline = last_seen if last_seen > 0 else SERVER_START_TIME
+    has_current_heartbeat = last_seen >= SERVER_START_TIME
+    baseline = last_seen if has_current_heartbeat else SERVER_START_TIME
     age = int(now - baseline)
 
-    if last_seen <= 0:
-        status.setdefault("device", "CASON-ESP32-01")
-        status.setdefault("last_source", "server_start_waiting")
-        status.setdefault("server_start_text", SERVER_START_TIME_TEXT)
+    if not has_current_heartbeat:
+        status.update({
+            "device": status.get("device") or "CASON-ESP32-01",
+            "last_source": "server_start_waiting",
+            "server_start_text": SERVER_START_TIME_TEXT,
+            "offline_notified": False,
+        })
+        for key in (
+            "last_offline_alert",
+            "last_offline_alert_text",
+            "last_offline_age_seconds",
+            "last_offline_line_sent",
+            "last_offline_line_result",
+            "last_online_alert",
+            "last_online_alert_text",
+            "last_online_line_sent",
+            "last_online_line_result",
+        ):
+            status.pop(key, None)
 
     if age < HEARTBEAT_TIMEOUT_SECONDS:
+        if not has_current_heartbeat:
+            save_heartbeat_status(status)
         return
 
     last_alert = float(status.get("last_offline_alert", 0) or 0)
@@ -858,8 +891,9 @@ class Handler(BaseHTTPRequestHandler):
                 "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
                 "esp32_heartbeat_seen": heartbeat_seen(),
                 "esp32_last_seen_age_seconds": heartbeat_age_seconds(),
-                "esp32_offline_notified": bool(
-                    load_heartbeat_status().get("offline_notified")
+                "esp32_offline_notified": (
+                    heartbeat_is_current()
+                    and bool(load_heartbeat_status().get("offline_notified"))
                 ),
                 "watchdog_state": watchdog_state(),
                 "server_start_text": SERVER_START_TIME_TEXT,
