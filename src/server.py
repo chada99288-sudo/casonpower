@@ -46,6 +46,9 @@ HEARTBEAT_TIMEOUT_SECONDS = int(
 HEARTBEAT_REPEAT_ALERT_SECONDS = int(
     os.getenv("CASON_HEARTBEAT_REPEAT_ALERT_SECONDS", "1800")
 )
+HEARTBEAT_RETRY_FAILED_ALERT_SECONDS = int(
+    os.getenv("CASON_HEARTBEAT_RETRY_FAILED_ALERT_SECONDS", "60")
+)
 HEARTBEAT_CHECK_INTERVAL_SECONDS = int(
     os.getenv("CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS", "30")
 )
@@ -616,6 +619,7 @@ def push_to_all_users(text):
             "user_id": user_id,
             "ok": ok,
             "http_code": code,
+            "response": response_text,
         })
 
     return sent > 0, {
@@ -732,7 +736,14 @@ def check_heartbeat_watchdog():
     last_alert = float(status.get("last_offline_alert", 0) or 0)
     already_notified = bool(status.get("offline_notified"))
 
-    if already_notified and now - last_alert < HEARTBEAT_REPEAT_ALERT_SECONDS:
+    last_line_sent = bool(status.get("last_offline_line_sent"))
+    retry_after = (
+        HEARTBEAT_REPEAT_ALERT_SECONDS
+        if last_line_sent
+        else HEARTBEAT_RETRY_FAILED_ALERT_SECONDS
+    )
+
+    if already_notified and now - last_alert < retry_after:
         return
 
     status["offline_notified"] = True
@@ -1341,6 +1352,10 @@ def main():
     print(
         f"Watchdog timeout: "
         f"{HEARTBEAT_TIMEOUT_SECONDS} วินาที"
+    )
+    print(
+        f"Watchdog retry failed alert: "
+        f"{HEARTBEAT_RETRY_FAILED_ALERT_SECONDS} วินาที"
     )
     print(
         "LINE Token: "
