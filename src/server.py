@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import random
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,16 @@ CASON_CHAOS_DROP_LINE_RATE = float(
     os.getenv("CASON_CHAOS_DROP_LINE_RATE", "0") or "0"
 )
 
+HEARTBEAT_TIMEOUT_SECONDS = int(
+    os.getenv("CASON_HEARTBEAT_TIMEOUT_SECONDS", "180")
+)
+HEARTBEAT_REPEAT_ALERT_SECONDS = int(
+    os.getenv("CASON_HEARTBEAT_REPEAT_ALERT_SECONDS", "1800")
+)
+HEARTBEAT_CHECK_INTERVAL_SECONDS = int(
+    os.getenv("CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS", "30")
+)
+
 DUPLICATE_BLOCK_SECONDS = int(
     os.getenv("CASON_DUPLICATE_BLOCK_SECONDS", "300")
 )
@@ -65,6 +76,7 @@ USER_FILE = PROJECT_ROOT / "line_users.json"
 COMMAND_FILE = PROJECT_ROOT / "command_queue.json"
 COMMAND_RESULT_FILE = PROJECT_ROOT / "command_results.json"
 COMMAND_INFLIGHT_FILE = PROJECT_ROOT / "command_inflight.json"
+HEARTBEAT_FILE = PROJECT_ROOT / "heartbeat_status.json"
 ALLOWED_LINE_COMMANDS = {
     "STATUS",
     "TEST",
@@ -613,6 +625,134 @@ def push_to_all_users(text):
     }
 
 
+def load_heartbeat_status():
+    if not HEARTBEAT_FILE.exists():
+        return {}
+
+    try:
+        data = json.loads(
+            HEARTBEAT_FILE.read_text(encoding="utf-8")
+        )
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:
+        print(f"[WATCHDOG] อ่านสถานะ heartbeat ไม่สำเร็จ: {exc}")
+
+    return {}
+
+
+def save_heartbeat_status(status):
+    HEARTBEAT_FILE.write_text(
+        json.dumps(
+            status,
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+
+def heartbeat_age_seconds(status=None):
+    status = status or load_heartbeat_status()
+    last_seen = float(status.get("last_seen", 0) or 0)
+    if last_seen <= 0:
+        return None
+    return max(0, int(time.time() - last_seen))
+
+
+def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
+    now = time.time()
+    status = load_heartbeat_status()
+    was_offline = bool(status.get("offline_notified"))
+
+    status.update({
+        "device": device or "CASON-ESP32-01",
+        "last_seen": now,
+        "last_seen_text": time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(now)
+        ),
+        "last_source": source,
+        "offline_notified": False,
+    })
+
+    if isinstance(data, dict):
+        status["last_payload"] = {
+            key: data.get(key)
+            for key in (
+                "di1_raw",
+                "di1_active",
+                "relay1",
+                "relay1_on",
+                "alarm_active",
+                "uptime_seconds",
+                "free_heap",
+                "wifi",
+                "ip",
+                "esp32_ip",
+            )
+            if key in data
+        }
+
+    save_heartbeat_status(status)
+
+    if was_offline:
+        print("[WATCHDOG] ESP32 กลับมาออนไลน์แล้ว")
+        push_to_all_users(
+            "CASON Watchdog\n"
+            "ESP32 กลับมาออนไลน์แล้ว\n"
+            f"Device: {status['device']}\n"
+            f"Source: {source}"
+        )
+
+    return status
+
+
+def check_heartbeat_watchdog():
+    status = load_heartbeat_status()
+    last_seen = float(status.get("last_seen", 0) or 0)
+
+    if last_seen <= 0:
+        return
+
+    now = time.time()
+    age = int(now - last_seen)
+
+    if age < HEARTBEAT_TIMEOUT_SECONDS:
+        return
+
+    last_alert = float(status.get("last_offline_alert", 0) or 0)
+    already_notified = bool(status.get("offline_notified"))
+
+    if already_notified and now - last_alert < HEARTBEAT_REPEAT_ALERT_SECONDS:
+        return
+
+    status["offline_notified"] = True
+    status["last_offline_alert"] = now
+    status["last_offline_alert_text"] = time.strftime(
+        "%Y-%m-%d %H:%M:%S",
+        time.localtime(now)
+    )
+    save_heartbeat_status(status)
+
+    print(f"[WATCHDOG] ESP32 ไม่ตอบสนอง age={age}s")
+    push_to_all_users(
+        "CASON Watchdog\n"
+        "ESP32 ไม่ตอบสนอง\n"
+        f"ไม่ได้รับ heartbeat {age} วินาที\n"
+        "อาจเกิดไฟดับ, เครื่องค้าง, Wi-Fi หลุด หรืออินเทอร์เน็ตมีปัญหา"
+    )
+
+
+def watchdog_loop():
+    while True:
+        try:
+            check_heartbeat_watchdog()
+        except Exception as exc:
+            print(f"[WATCHDOG] ตรวจสอบผิดพลาด: {exc}")
+        time.sleep(max(5, HEARTBEAT_CHECK_INTERVAL_SECONDS))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CasonLineServer/3.0"
 
@@ -625,6 +765,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if maybe_apply_chaos(self, path):
             return
+
+        check_heartbeat_watchdog()
 
         if path == "/api/command":
             self.handle_command_poll()
@@ -663,6 +805,11 @@ class Handler(BaseHTTPRequestHandler):
                     load_command_queue()
                 ),
                 "chaos_mode": CASON_CHAOS_MODE,
+                "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
+                "esp32_last_seen_age_seconds": heartbeat_age_seconds(),
+                "esp32_offline_notified": bool(
+                    load_heartbeat_status().get("offline_notified")
+                ),
             }
         )
 
@@ -672,12 +819,18 @@ class Handler(BaseHTTPRequestHandler):
         if maybe_apply_chaos(self, path):
             return
 
+        check_heartbeat_watchdog()
+
         if path == "/webhook":
             self.handle_line_webhook()
             return
 
         if path == "/api/command/result":
             self.handle_command_result()
+            return
+
+        if path == "/api/heartbeat":
+            self.handle_esp32_heartbeat()
             return
 
         if path in ALLOWED_ESP32_PATHS:
@@ -691,7 +844,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": False,
                 "error": "unsupported_path",
                 "allowed_paths": sorted(
-                    ALLOWED_ESP32_PATHS | {"/webhook", "/api/command", "/api/command/result"}
+                    ALLOWED_ESP32_PATHS | {"/webhook", "/api/command", "/api/command/result", "/api/heartbeat"}
                 ),
             }
         )
@@ -850,6 +1003,11 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def handle_command_poll(self):
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        device = (query.get("device") or ["CASON-ESP32-01"])[0]
+        mark_device_seen(device, "command_poll")
+
         command = pop_next_command()
 
         if not command:
@@ -938,6 +1096,59 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
+    def handle_esp32_heartbeat(self):
+        raw_body, error = self.read_raw_body()
+
+        if error or not raw_body:
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": error or "empty_body"
+                }
+            )
+            return
+
+        try:
+            data = json.loads(raw_body.decode("utf-8"))
+        except Exception as exc:
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": "invalid_json",
+                    "detail": str(exc)
+                }
+            )
+            return
+
+        if not isinstance(data, dict):
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": "json_must_be_object"
+                }
+            )
+            return
+
+        device = str(data.get("device") or "CASON-ESP32-01")
+        status = mark_device_seen(device, "heartbeat", data)
+
+        send_json(
+            self,
+            200,
+            {
+                "ok": True,
+                "accepted": True,
+                "device": status.get("device"),
+                "timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
+            }
+        )
+
     def handle_esp32_event(self):
         raw_body, error = self.read_raw_body()
 
@@ -981,6 +1192,12 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+
+        mark_device_seen(
+            str(data.get("device") or "CASON-ESP32-01"),
+            "esp32_event",
+            data
+        )
 
         print("=" * 60)
         print(
@@ -1089,9 +1306,14 @@ def main():
     print("รองรับ LINE POST /webhook")
     print("รองรับ ESP32 GET /api/command")
     print("รองรับ ESP32 POST /api/command/result")
+    print("รองรับ ESP32 POST /api/heartbeat")
     print(
         f"ป้องกันข้อความเดิมส่งซ้ำ "
         f"{DUPLICATE_BLOCK_SECONDS} วินาที"
+    )
+    print(
+        f"Watchdog timeout: "
+        f"{HEARTBEAT_TIMEOUT_SECONDS} วินาที"
     )
     print(
         "LINE Token: "
@@ -1123,6 +1345,12 @@ def main():
         print("CHAOS MODE: ปิดอยู่")
     print("หยุดโปรแกรมด้วย Control + C")
     print("=" * 55)
+
+    watchdog_thread = threading.Thread(
+        target=watchdog_loop,
+        daemon=True
+    )
+    watchdog_thread.start()
 
     server = ThreadingHTTPServer(
         (HOST, PORT),

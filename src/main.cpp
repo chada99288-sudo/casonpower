@@ -31,6 +31,7 @@ const char *LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
 const char *COMMAND_SERVER_BASE_URL = "https://casonpower.onrender.com";
 constexpr bool COMMAND_SERVER_ENABLED = true;
 constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 3000;
+constexpr uint32_t SERVER_HEARTBEAT_INTERVAL_MS = 30000;
 
 // -----------------------------------------------------
 // Waveshare TCA9554 Relay Controller
@@ -90,6 +91,7 @@ uint32_t di1LastChangeTime = 0;
 uint32_t relayRestoreStartTime = 0;
 uint32_t lastHeartbeatTime = 0;
 uint32_t lastCommandPollTime = 0;
+uint32_t lastServerHeartbeatTime = 0;
 uint32_t lastWiFiPortalTime = 0;
 uint32_t lastWiFiConnectAttemptTime = 0;
 bool wifiSetupPortalRunning = false;
@@ -117,6 +119,7 @@ void queueServerMessage(const String &eventName, const String &statusName, const
 void updateServerQueue();
 void resetWiFiSettings();
 void updateWiFiPortal();
+void updateServerHeartbeat();
 String buildSystemCheckMessage();
 bool checkCommandServer();
 bool isRelayControllerOnline();
@@ -1376,6 +1379,69 @@ bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure
     return http.begin(plainClient, url);
 }
 
+void updateServerHeartbeat()
+{
+    if (!COMMAND_SERVER_ENABLED || strlen(COMMAND_SERVER_BASE_URL) == 0)
+    {
+        return;
+    }
+
+    if (millis() - lastServerHeartbeatTime < SERVER_HEARTBEAT_INTERVAL_MS)
+    {
+        return;
+    }
+
+    lastServerHeartbeatTime = millis();
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        return;
+    }
+
+    String url = COMMAND_SERVER_BASE_URL;
+    url += "/api/heartbeat";
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    HTTPClient http;
+
+    if (!httpBeginForURL(http, plainClient, secureClient, url))
+    {
+        Serial.println("[HEARTBEAT] http.begin failed");
+        return;
+    }
+
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");
+
+    JsonDocument document;
+    document["device"] = "CASON-ESP32-01";
+    document["controller"] = "Cason Solar Safety Controller";
+    document["uptime_seconds"] = millis() / 1000;
+    document["free_heap"] = ESP.getFreeHeap();
+    document["di1_raw"] = readDI1Raw();
+    document["di1_active"] = di1Active;
+    document["relay1"] = relay1On ? "ON" : "OFF";
+    document["relay1_on"] = relay1On;
+    document["alarm_active"] = alarmActive;
+    document["restore_pending"] = relayRestorePending;
+    document["line_queue_pending"] = serverMessagePending;
+    document["wifi"] = "CONNECTED";
+    document["ip"] = WiFi.localIP().toString();
+
+    String payload;
+    serializeJson(document, payload);
+
+    const int code = http.POST(payload);
+    Serial.print("[HEARTBEAT] HTTP=");
+    Serial.println(code);
+
+    http.end();
+}
+
+
 void postCommandResult(
     const String &commandId,
     const String &command,
@@ -1726,6 +1792,7 @@ void loop()
     updateStatusIndicators("loop");
     updateWiFiPortal();
     updateCommandPoll();
+    updateServerHeartbeat();
     updateHeartbeat();
     updateServerQueue();
     updateWiFiReset();
