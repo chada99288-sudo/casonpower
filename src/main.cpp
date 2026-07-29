@@ -48,11 +48,11 @@ constexpr uint8_t RELAY_CH4_RED = 4;
 
 // -----------------------------------------------------
 // Digital Input
-// DI1: safety alarm, normal HIGH, active LOW
+// DI1: safety alarm NC, normal LOW, active HIGH
 // DI2: dry contact NC, normal LOW, active HIGH
 // -----------------------------------------------------
 constexpr uint8_t DI1_PIN = 4;
-constexpr uint8_t DI1_ACTIVE_LEVEL = LOW;
+constexpr uint8_t DI1_ACTIVE_LEVEL = HIGH;
 constexpr uint8_t DI1_INPUT_MODE = INPUT_PULLUP;
 
 constexpr uint8_t DI2_PIN = 5;
@@ -999,7 +999,7 @@ void showStatus()
     Serial.print("Command Srv : ");
     Serial.println(COMMAND_SERVER_BASE_URL);
 
-    Serial.print("DI1 Logic   : NORMAL=1, ACTIVE=0");
+    Serial.print("DI1 Logic   : NC NORMAL=0, ACTIVE=1");
     Serial.println();
 
     Serial.print("DI2 Logic   : NC NORMAL=0, ACTIVE=1");
@@ -1291,7 +1291,7 @@ String buildSystemCheckMessage()
     const bool wifiOk = WiFi.status() == WL_CONNECTED || connectWiFi();
     const bool relayControllerOk = isRelayControllerOnline();
     const bool commandServerOk = checkCommandServer();
-    const bool di1RawNormal = readDI1Raw() == HIGH;
+    const bool di1RawNormal = readDI1Raw() == LOW;
     const bool di1StateNormal = !di1Active && !readDI1();
     const bool di2RawNormal = readDI2Raw() == LOW;
     const bool di2StateNormal = !di2Active && !readDI2();
@@ -1319,7 +1319,7 @@ String buildSystemCheckMessage()
     message += "\nRender Server: " + okText(commandServerOk);
     message += "\nRelay Controller: " + okText(relayControllerOk);
     message += "\nDI1 RAW: " + String(readDI1Raw());
-    message += di1RawNormal ? " (ปกติ)" : " (ผิดปกติ)";
+    message += di1RawNormal ? " (ปกติ NC ปิด)" : " (ทำงาน/วงจรเปิด)";
     message += "\nDI1 State: ";
     message += di1StateNormal ? "NORMAL" : "ACTIVE";
     message += "\nDI2 RAW: " + String(readDI2Raw());
@@ -1791,7 +1791,7 @@ void setup()
         "======================================"
     );
 
-    // DI1 เป็น Active LOW: ปกติ = HIGH (1), ผิดปกติ = LOW (0)
+    // DI1 เป็น dry contact NC: ปกติปิด = LOW (0), ทำงาน/เปิดวงจร = HIGH (1)
     // DI2 เป็น dry contact NC: ปกติปิด = LOW (0), ทำงาน/เปิดวงจร = HIGH (1)
     pinMode(DI1_PIN, DI1_INPUT_MODE);
     pinMode(DI2_PIN, DI2_INPUT_MODE);
@@ -1822,8 +1822,8 @@ void setup()
     }
 
     // Fail-safe:
-    // ถ้า DI1 ปกติ ให้เปิด Relay CH1
-    // ถ้า DI1 ผิดปกติตั้งแต่เปิดเครื่อง ให้ Relay CH1 คง OFF
+    // ถ้า DI1 NC ปิดปกติ ให้เปิด Relay CH1
+    // ถ้า DI1 เปิดวงจร/ผิดปกติตั้งแต่เปิดเครื่อง ให้ Relay CH1 คง OFF
     if (di1Active)
     {
         alarmActive = true;
