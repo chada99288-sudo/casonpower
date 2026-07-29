@@ -5,11 +5,10 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
-#include "line_secret.h"
 
 // =====================================================
 // CASON SOLAR SAFETY CONTROLLER
-// ESP32 -> LINE DIRECT
+// ESP32 -> RENDER -> LINE
 // RELAY CH1 + DIGITAL INPUT 1
 // =====================================================
 
@@ -18,11 +17,6 @@
 // -----------------------------------------------------
 const char *WIFI_SETUP_AP_NAME = "CASON-SETUP";
 const char *WIFI_SETUP_AP_PASSWORD = "cason1234";
-
-// -----------------------------------------------------
-// LINE Messaging API Direct
-// -----------------------------------------------------
-const char *LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
 
 // -----------------------------------------------------
 // LINE Command Server / Webhook Bridge
@@ -100,7 +94,7 @@ uint32_t wifiResetRequestTime = 0;
 
 WiFiManager wifiManager;
 
-// คิวเหตุการณ์ที่จะส่ง LINE โดยตรง
+// คิวเหตุการณ์ที่จะส่งผ่าน Render ไป LINE
 String pendingEvent;
 String pendingStatus;
 String pendingMessage;
@@ -480,19 +474,45 @@ void updateWiFiReset()
 }
 
 // =====================================================
-// LINE Direct
+// Render Event Bridge
 // =====================================================
 
-String buildLinePayload(const String &message)
+String buildServerEventPayload(
+    const String &eventName,
+    const String &statusName,
+    const String &message)
 {
     JsonDocument document;
 
-    document["to"] = LINE_USER_ID;
+    document["device"] = "CASON-ESP32-01";
+    document["controller"] = "Cason Solar Safety Controller";
+    document["event"] = eventName;
+    document["type"] = eventName;
+    document["status"] = statusName;
+    document["message"] = message;
+    document["detail"] = message;
+    document["active"] = statusName == "ACTIVE";
+    document["source"] = "DI1";
+    document["sensor"] = "Digital Input 1";
+    document["channel"] = 1;
+    document["di_channel"] = 1;
+    document["di1_raw"] = readDI1Raw();
+    document["di1_active"] = di1Active;
+    document["relay_channel"] = 1;
+    document["relay1"] = relay1On ? "ON" : "OFF";
+    document["relay1_on"] = relay1On;
+    document["alarm_active"] = alarmActive;
+    document["restore_pending"] = relayRestorePending;
+    document["uptime_ms"] = millis();
+    document["uptime_seconds"] = millis() / 1000;
+    document["free_heap"] = ESP.getFreeHeap();
+    document["wifi"] = WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED";
 
-    JsonArray messages = document["messages"].to<JsonArray>();
-    JsonObject textMessage = messages.add<JsonObject>();
-    textMessage["type"] = "text";
-    textMessage["text"] = message;
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        document["esp32_ip"] = WiFi.localIP().toString();
+        document["ip"] = WiFi.localIP().toString();
+    }
 
     String payload;
     serializeJson(document, payload);
@@ -500,75 +520,62 @@ String buildLinePayload(const String &message)
     return payload;
 }
 
-String buildLineText(
+bool sendEventToRender(
     const String &eventName,
     const String &statusName,
     const String &message)
 {
-    String text;
-    text += "CASON Solar Safety Controller\n";
-    text += "Event: " + eventName + "\n";
-    text += "Status: " + statusName + "\n";
-    text += message + "\n";
-    text += "DI1 RAW: " + String(readDI1Raw()) + "\n";
-    text += "DI1: " + String(di1StateText(di1Active)) + "\n";
-    text += "Relay CH1: " + String(relay1On ? "ON" : "OFF") + "\n";
-    text += "Alarm: " + String(alarmActive ? "ACTIVE" : "NORMAL") + "\n";
-    text += "Uptime: " + String(millis() / 1000) + " วินาที";
-
-    return text;
-}
-
-bool sendEventToLine(
-    const String &eventName,
-    const String &statusName,
-    const String &message)
-{
-    if (!connectWiFi())
+    if (!COMMAND_SERVER_ENABLED || strlen(COMMAND_SERVER_BASE_URL) == 0)
     {
-        Serial.println("[LINE-DIRECT] Wi-Fi not connected");
+        Serial.println("[SERVER] Command server disabled");
         return false;
     }
 
-    WiFiClientSecure client;
-    client.setInsecure();
+    if (!connectWiFi())
+    {
+        Serial.println("[SERVER] Wi-Fi not connected");
+        return false;
+    }
 
+    String url = COMMAND_SERVER_BASE_URL;
+    url += "/api/alert";
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
     HTTPClient http;
 
-    Serial.print("[LINE-DIRECT] POST ");
-    Serial.println(LINE_PUSH_URL);
+    Serial.print("[SERVER] POST ");
+    Serial.println(url);
 
-    if (!http.begin(client, LINE_PUSH_URL))
+    if (!httpBeginForURL(http, plainClient, secureClient, url))
     {
-        Serial.println("[LINE-DIRECT] http.begin failed");
+        Serial.println("[SERVER] http.begin failed");
         return false;
     }
 
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader("Content-Type", "application/json");
-    http.addHeader(
-        "Authorization",
-        String("Bearer ") + LINE_CHANNEL_ACCESS_TOKEN
-    );
     http.addHeader("Connection", "close");
 
-    const String lineText =
-        buildLineText(eventName, statusName, message);
-    const String payload = buildLinePayload(lineText);
+    const String payload = buildServerEventPayload(
+        eventName,
+        statusName,
+        message
+    );
 
-    Serial.print("[LINE-DIRECT] Event=");
+    Serial.print("[SERVER] Event=");
     Serial.println(eventName);
 
     const int httpCode = http.POST(payload);
     const String response = http.getString();
 
-    Serial.print("[LINE-DIRECT] HTTP=");
+    Serial.print("[SERVER] HTTP=");
     Serial.println(httpCode);
 
     if (response.length() > 0)
     {
-        Serial.print("[LINE-DIRECT] Response=");
+        Serial.print("[SERVER] Response=");
         Serial.println(response);
     }
 
@@ -577,13 +584,14 @@ bool sendEventToLine(
     return httpCode >= 200 && httpCode < 300;
 }
 
-bool sendQueuedEventToLine(
+bool sendQueuedEventToRender(
     const String &eventName,
     const String &statusName,
     const String &message)
 {
-    return sendEventToLine(eventName, statusName, message);
+    return sendEventToRender(eventName, statusName, message);
 }
+
 
 bool isImportantLineEvent(const String &eventName)
 {
@@ -605,14 +613,14 @@ void queueServerMessage(
         isImportantLineEvent(pendingEvent) &&
         !isImportantLineEvent(eventName))
     {
-        Serial.print("[LINE-DIRECT] Drop non-critical event while important event pending: ");
+        Serial.print("[SERVER] Drop non-critical event while important event pending: ");
         Serial.println(eventName);
         return;
     }
 
     if (serverMessagePending)
     {
-        Serial.print("[LINE-DIRECT] Replace pending event ");
+        Serial.print("[SERVER] Replace pending event ");
         Serial.print(pendingEvent);
         Serial.print(" with ");
         Serial.println(eventName);
@@ -625,7 +633,7 @@ void queueServerMessage(
     serverMessagePending = true;
     nextServerAttemptTime = millis();
 
-    Serial.print("[LINE-DIRECT] Queued event: ");
+    Serial.print("[SERVER] Queued event: ");
     Serial.println(eventName);
 
     updateStatusIndicators("line_queue_pending");
@@ -645,10 +653,10 @@ void updateServerQueue()
     }
 
     Serial.println(
-        "[LINE-DIRECT] Sending queued event..."
+        "[SERVER] Sending queued event..."
     );
 
-    if (sendQueuedEventToLine(
+    if (sendQueuedEventToRender(
             pendingEvent,
             pendingStatus,
             pendingMessage))
@@ -659,7 +667,7 @@ void updateServerQueue()
         pendingStatus = "";
         pendingMessage = "";
 
-        Serial.println("[LINE-DIRECT] Queue cleared");
+        Serial.println("[SERVER] Queue cleared");
         updateStatusIndicators("line_queue_cleared");
     }
     else
@@ -668,7 +676,7 @@ void updateServerQueue()
             millis() + SERVER_RETRY_DELAY_MS;
 
         Serial.println(
-            "[LINE-DIRECT] Send failed; "
+            "[SERVER] Send failed; "
             "retry in 30 seconds"
         );
         updateStatusIndicators("line_queue_retry");
@@ -852,7 +860,7 @@ void updateAutoRestore()
     if (setRelay(1, true))
     {
         Serial.println(
-            "[LINE-DIRECT] Queuing RECOVERY after restore delay"
+            "[SERVER] Queuing RECOVERY after restore delay"
         );
         const String recoveryMessage =
             String("Digital Input 1 กลับสู่สถานะปกติครบ 30 วินาทีแล้ว\n") +
@@ -905,9 +913,6 @@ void showStatus()
         Serial.print("ESP32 IP    : ");
         Serial.println(WiFi.localIP());
     }
-
-    Serial.print("LINE Direct : ");
-    Serial.println(LINE_PUSH_URL);
 
     Serial.print("Command Srv : ");
     Serial.println(COMMAND_SERVER_BASE_URL);
@@ -1055,7 +1060,7 @@ void processCommand(String command)
         );
 
         Serial.println(
-            "[TEST] LINE message queued"
+            "[TEST] Server message queued"
         );
     }
     else if (command == "STATUS")
@@ -1666,7 +1671,7 @@ void setup()
         "   CASON SOLAR SAFETY CONTROLLER"
     );
     Serial.println(
-        "     ESP32 -> LINE DIRECT"
+        "     ESP32 -> RENDER -> LINE"
     );
     Serial.println(
         "======================================"
@@ -1744,7 +1749,7 @@ void setup()
             "[SYSTEM] Wi-Fi not ready"
         );
         Serial.println(
-            "[SYSTEM] LINE queue will retry"
+            "[SYSTEM] Server queue will retry"
         );
     }
 
