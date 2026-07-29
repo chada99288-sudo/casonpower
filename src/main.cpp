@@ -47,13 +47,19 @@ constexpr uint8_t RELAY_CH3_YELLOW = 3;
 constexpr uint8_t RELAY_CH4_RED = 4;
 
 // -----------------------------------------------------
-// Digital Input 1
+// Digital Input
+// DI1: safety alarm, normal HIGH, active LOW
+// DI2: dry contact NC, normal LOW, active HIGH
 // -----------------------------------------------------
 constexpr uint8_t DI1_PIN = 4;
 constexpr uint8_t DI1_ACTIVE_LEVEL = LOW;
 constexpr uint8_t DI1_INPUT_MODE = INPUT_PULLUP;
 
-constexpr uint32_t DI1_DEBOUNCE_MS = 150;
+constexpr uint8_t DI2_PIN = 5;
+constexpr uint8_t DI2_ACTIVE_LEVEL = HIGH;
+constexpr uint8_t DI2_INPUT_MODE = INPUT_PULLUP;
+
+constexpr uint32_t DI_DEBOUNCE_MS = 150;
 constexpr uint32_t RELAY_RESTORE_DELAY_MS = 30000;
 constexpr uint32_t HEARTBEAT_MS = 1000;
 constexpr uint32_t SERVER_RETRY_DELAY_MS = 30000;
@@ -70,6 +76,8 @@ bool alarmActive = false;
 
 bool di1Active = false;
 bool di1LastActiveState = false;
+bool di2Active = false;
+bool di2LastActiveState = false;
 bool relayRestorePending = false;
 
 enum IndicatorState
@@ -83,6 +91,7 @@ enum IndicatorState
 IndicatorState currentIndicatorState = INDICATOR_UNKNOWN;
 
 uint32_t di1LastChangeTime = 0;
+uint32_t di2LastChangeTime = 0;
 uint32_t relayRestoreStartTime = 0;
 uint32_t lastHeartbeatTime = 0;
 uint32_t lastCommandPollTime = 0;
@@ -105,8 +114,11 @@ uint32_t nextServerAttemptTime = 0;
 
 int readDI1Raw();
 bool readDI1();
+int readDI2Raw();
+bool readDI2();
 const char *di1StateText(bool active);
 void printDI1Detail(const char *prefix);
+void printDI2Detail(const char *prefix);
 void updateStatusIndicators(const char *reason);
 void processCommand(String command);
 void showStatus();
@@ -296,7 +308,8 @@ void updateStatusIndicators(const char *reason)
     {
         nextState = INDICATOR_MAJOR_FAULT;
     }
-    else if (alarmActive || relayRestorePending ||
+    else if (di2Active || readDI2() ||
+             alarmActive || relayRestorePending ||
              serverMessagePending ||
              WiFi.status() != WL_CONNECTED)
     {
@@ -499,6 +512,8 @@ String buildServerEventPayload(
     document["di_channel"] = 1;
     document["di1_raw"] = readDI1Raw();
     document["di1_active"] = di1Active;
+    document["di2_raw"] = readDI2Raw();
+    document["di2_active"] = di2Active;
     document["relay_channel"] = 1;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
@@ -685,7 +700,7 @@ void updateServerQueue()
 }
 
 // =====================================================
-// DI1
+// Digital Inputs
 // =====================================================
 
 int readDI1Raw()
@@ -698,23 +713,56 @@ bool readDI1()
     return readDI1Raw() == DI1_ACTIVE_LEVEL;
 }
 
+int readDI2Raw()
+{
+    return digitalRead(DI2_PIN);
+}
+
+bool readDI2()
+{
+    return readDI2Raw() == DI2_ACTIVE_LEVEL;
+}
+
 const char *di1StateText(bool active)
 {
     return active ? "ACTIVE" : "NORMAL";
 }
 
-void printDI1Detail(const char *prefix)
+void printInputDetail(
+    const char *prefix,
+    uint8_t pin,
+    int rawValue,
+    uint8_t activeLevel)
 {
-    const int rawValue = readDI1Raw();
-    const bool active = rawValue == DI1_ACTIVE_LEVEL;
+    const bool active = rawValue == activeLevel;
 
     Serial.print(prefix);
     Serial.print(" GPIO");
-    Serial.print(DI1_PIN);
+    Serial.print(pin);
     Serial.print(" RAW=");
     Serial.print(rawValue);
     Serial.print(" STATUS=");
     Serial.println(di1StateText(active));
+}
+
+void printDI1Detail(const char *prefix)
+{
+    printInputDetail(
+        prefix,
+        DI1_PIN,
+        readDI1Raw(),
+        DI1_ACTIVE_LEVEL
+    );
+}
+
+void printDI2Detail(const char *prefix)
+{
+    printInputDetail(
+        prefix,
+        DI2_PIN,
+        readDI2Raw(),
+        DI2_ACTIVE_LEVEL
+    );
 }
 
 
@@ -785,7 +833,7 @@ void updateDI1()
     }
 
     if (millis() - di1LastChangeTime <
-        DI1_DEBOUNCE_MS)
+        DI_DEBOUNCE_MS)
     {
         return;
     }
@@ -813,6 +861,39 @@ void updateDI1()
         );
         startRelayRestoreDelay("di1_normal");
     }
+}
+
+void updateDI2()
+{
+    const bool activeState = readDI2();
+
+    if (activeState != di2LastActiveState)
+    {
+        di2LastActiveState = activeState;
+        di2LastChangeTime = millis();
+    }
+
+    if (millis() - di2LastChangeTime <
+        DI_DEBOUNCE_MS)
+    {
+        return;
+    }
+
+    if (activeState == di2Active)
+    {
+        return;
+    }
+
+    di2Active = activeState;
+
+    Serial.print("[DI2] ");
+    Serial.println(
+        di1StateText(di2Active)
+    );
+
+    updateStatusIndicators(
+        di2Active ? "di2_minor_fault" : "di2_normal"
+    );
 }
 
 void updateAutoRestore()
@@ -921,12 +1002,23 @@ void showStatus()
     Serial.print("DI1 Logic   : NORMAL=1, ACTIVE=0");
     Serial.println();
 
+    Serial.print("DI2 Logic   : NC NORMAL=0, ACTIVE=1");
+    Serial.println();
+
     Serial.print("DI1 RAW     : ");
     Serial.println(readDI1Raw());
 
     Serial.print("DI1         : ");
     Serial.println(
         di1StateText(di1Active)
+    );
+
+    Serial.print("DI2 RAW     : ");
+    Serial.println(readDI2Raw());
+
+    Serial.print("DI2         : ");
+    Serial.println(
+        di1StateText(di2Active)
     );
 
     Serial.print("Relay CH1   : ");
@@ -1084,6 +1176,7 @@ void processCommand(String command)
     else if (command == "RAW")
     {
         printDI1Detail("[DI1]");
+        printDI2Detail("[DI2]");
     }
     else if (command == "HELP")
     {
@@ -1137,6 +1230,8 @@ String buildStatusMessage()
     message += WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED";
     message += "\nDI1 RAW: " + String(readDI1Raw());
     message += "\nDI1: " + String(di1StateText(di1Active));
+    message += "\nDI2 RAW: " + String(readDI2Raw());
+    message += "\nDI2: " + String(di1StateText(di2Active));
     message += "\nRelay CH1: ";
     message += relay1On ? "ON" : "OFF";
     message += "\nAlarm: ";
@@ -1196,15 +1291,18 @@ String buildSystemCheckMessage()
     const bool wifiOk = WiFi.status() == WL_CONNECTED || connectWiFi();
     const bool relayControllerOk = isRelayControllerOnline();
     const bool commandServerOk = checkCommandServer();
-    const bool diRawNormal = readDI1Raw() == HIGH;
-    const bool diStateNormal = !di1Active && !readDI1();
+    const bool di1RawNormal = readDI1Raw() == HIGH;
+    const bool di1StateNormal = !di1Active && !readDI1();
+    const bool di2RawNormal = readDI2Raw() == LOW;
+    const bool di2StateNormal = !di2Active && !readDI2();
     const bool expectedRelayOn = !alarmActive && !di1Active && !readDI1() && !relayRestorePending;
     const bool relayStateOk = relay1On == expectedRelayOn;
     const bool lineQueueOk = !serverMessagePending;
     const bool heapOk = ESP.getFreeHeap() > 50000;
     const bool restoreOk = !relayRestorePending || (!di1Active && !readDI1());
     const bool allOk = wifiOk && relayControllerOk && commandServerOk &&
-                       diStateNormal && relayStateOk && lineQueueOk &&
+                       di1StateNormal && di2StateNormal &&
+                       relayStateOk && lineQueueOk &&
                        heapOk && restoreOk;
 
     String message;
@@ -1221,9 +1319,13 @@ String buildSystemCheckMessage()
     message += "\nRender Server: " + okText(commandServerOk);
     message += "\nRelay Controller: " + okText(relayControllerOk);
     message += "\nDI1 RAW: " + String(readDI1Raw());
-    message += diRawNormal ? " (ปกติ)" : " (ผิดปกติ)";
+    message += di1RawNormal ? " (ปกติ)" : " (ผิดปกติ)";
     message += "\nDI1 State: ";
-    message += diStateNormal ? "NORMAL" : "ACTIVE";
+    message += di1StateNormal ? "NORMAL" : "ACTIVE";
+    message += "\nDI2 RAW: " + String(readDI2Raw());
+    message += di2RawNormal ? " (ปกติ NC ปิด)" : " (ทำงาน/วงจรเปิด)";
+    message += "\nDI2 State: ";
+    message += di2StateNormal ? "NORMAL" : "ACTIVE";
     message += "\nRelay CH1: ";
     message += relay1On ? "ON" : "OFF";
     message += "\nRelay Logic: " + okText(relayStateOk);
@@ -1239,7 +1341,7 @@ String buildSystemCheckMessage()
 
     if (!allOk)
     {
-        message += "\nหมายเหตุ: ถ้า DI1 ผิดปกติหรือกำลัง Restore ระบบอาจยังไม่เขียวจนกว่าจะกลับปกติ";
+        message += "\nหมายเหตุ: DI1 เป็น alarm สีแดง, DI2 เป็น dry contact NC สีเหลือง";
     }
 
     return message;
@@ -1429,6 +1531,8 @@ void updateServerHeartbeat()
     document["free_heap"] = ESP.getFreeHeap();
     document["di1_raw"] = readDI1Raw();
     document["di1_active"] = di1Active;
+    document["di2_raw"] = readDI2Raw();
+    document["di2_active"] = di2Active;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
     document["alarm_active"] = alarmActive;
@@ -1631,6 +1735,14 @@ void updateHeartbeat()
         di1StateText(di1Active)
     );
 
+    Serial.print(" DI2_RAW=");
+    Serial.print(readDI2Raw());
+
+    Serial.print(" DI2=");
+    Serial.print(
+        di1StateText(di2Active)
+    );
+
     Serial.print(" ALARM=");
     Serial.print(
         alarmActive ? "ACTIVE" : "NORMAL"
@@ -1679,15 +1791,21 @@ void setup()
         "======================================"
     );
 
-    // DI1 เป็น Active LOW:
-    // ปกติ = HIGH (1), ผิดปกติ = LOW (0)
+    // DI1 เป็น Active LOW: ปกติ = HIGH (1), ผิดปกติ = LOW (0)
+    // DI2 เป็น dry contact NC: ปกติปิด = LOW (0), ทำงาน/เปิดวงจร = HIGH (1)
     pinMode(DI1_PIN, DI1_INPUT_MODE);
+    pinMode(DI2_PIN, DI2_INPUT_MODE);
 
     di1LastActiveState = readDI1();
     di1Active = di1LastActiveState;
     di1LastChangeTime = millis();
 
+    di2LastActiveState = readDI2();
+    di2Active = di2LastActiveState;
+    di2LastChangeTime = millis();
+
     printDI1Detail("[DI1] Startup");
+    printDI2Detail("[DI2] Startup");
 
     if (!tcaBegin())
     {
@@ -1774,6 +1892,7 @@ void setup()
             "CASON Solar Safety Controller\n"
             "ESP32 เปิดเครื่องเรียบร้อย\n"
             "Digital Input 1 ปกติ\n"
+            "Digital Input 2 NC ปกติ\n"
             "Relay CH1 ถูกสั่ง ON\n"
             "ระบบกำลังทำงาน"
         );
@@ -1795,6 +1914,7 @@ void loop()
 {
     updateSerial();
     updateDI1();
+    updateDI2();
     updateAutoRestore();
     updateStatusIndicators("loop");
     updateWiFiPortal();
