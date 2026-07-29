@@ -63,6 +63,10 @@ constexpr uint32_t DI_DEBOUNCE_MS = 150;
 constexpr uint32_t RELAY_RESTORE_DELAY_MS = 30000;
 constexpr uint32_t HEARTBEAT_MS = 1000;
 constexpr uint32_t YELLOW_BLINK_INTERVAL_MS = 500;
+constexpr uint32_t RED_BLINK_SHORT_ON_MS = 200;
+constexpr uint32_t RED_BLINK_SHORT_OFF_MS = 300;
+constexpr uint32_t RED_BLINK_LONG_ON_MS = 1000;
+constexpr uint32_t RED_BLINK_LONG_OFF_MS = 1500;
 constexpr uint32_t SERVER_RETRY_DELAY_MS = 30000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 3000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 3000;
@@ -92,7 +96,10 @@ enum IndicatorState
 IndicatorState currentIndicatorState = INDICATOR_UNKNOWN;
 
 bool yellowBlinkOn = false;
+bool redBlinkOn = false;
+uint8_t redBlinkPhase = 0;
 uint32_t lastYellowBlinkTime = 0;
+uint32_t lastRedBlinkTime = 0;
 
 uint32_t di1LastChangeTime = 0;
 uint32_t di2LastChangeTime = 0;
@@ -328,7 +335,10 @@ void updateStatusIndicators(const char *reason)
 
     currentIndicatorState = nextState;
     yellowBlinkOn = currentIndicatorState == INDICATOR_MINOR_FAULT;
+    redBlinkOn = currentIndicatorState == INDICATOR_MAJOR_FAULT;
+    redBlinkPhase = 0;
     lastYellowBlinkTime = millis();
+    lastRedBlinkTime = millis();
 
     Serial.print("[STATUS-LIGHT] ");
     Serial.print(indicatorStateText(currentIndicatorState));
@@ -342,22 +352,56 @@ void updateStatusIndicators(const char *reason)
     );
 }
 
+uint32_t redBlinkPhaseDuration()
+{
+    switch (redBlinkPhase)
+    {
+    case 0:
+        return RED_BLINK_SHORT_ON_MS;
+    case 1:
+        return RED_BLINK_SHORT_OFF_MS;
+    case 2:
+        return RED_BLINK_LONG_ON_MS;
+    default:
+        return RED_BLINK_LONG_OFF_MS;
+    }
+}
+
+bool redBlinkPhaseOutput()
+{
+    return redBlinkPhase == 0 || redBlinkPhase == 2;
+}
+
 void updateIndicatorBlink()
 {
-    if (currentIndicatorState != INDICATOR_MINOR_FAULT)
+    if (currentIndicatorState == INDICATOR_MINOR_FAULT)
+    {
+        if (millis() - lastYellowBlinkTime <
+            YELLOW_BLINK_INTERVAL_MS)
+        {
+            return;
+        }
+
+        lastYellowBlinkTime = millis();
+        yellowBlinkOn = !yellowBlinkOn;
+        setRelay(RELAY_CH3_YELLOW, yellowBlinkOn);
+        return;
+    }
+
+    if (currentIndicatorState != INDICATOR_MAJOR_FAULT)
     {
         return;
     }
 
-    if (millis() - lastYellowBlinkTime <
-        YELLOW_BLINK_INTERVAL_MS)
+    if (millis() - lastRedBlinkTime < redBlinkPhaseDuration())
     {
         return;
     }
 
-    lastYellowBlinkTime = millis();
-    yellowBlinkOn = !yellowBlinkOn;
-    setRelay(RELAY_CH3_YELLOW, yellowBlinkOn);
+    lastRedBlinkTime = millis();
+    redBlinkPhase = (redBlinkPhase + 1) % 4;
+    redBlinkOn = redBlinkPhaseOutput();
+    setRelay(RELAY_CH4_RED, redBlinkOn);
 }
 
 // =====================================================
