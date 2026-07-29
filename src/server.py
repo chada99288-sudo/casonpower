@@ -21,8 +21,14 @@ load_dotenv()
 HOST = os.getenv("CASON_SERVER_HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT") or os.getenv("CASON_SERVER_PORT", "8080"))
 
-LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
+RAW_LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+RAW_LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+LINE_TOKEN = RAW_LINE_TOKEN.splitlines()[0].strip() if RAW_LINE_TOKEN else ""
+LINE_CHANNEL_SECRET = (
+    RAW_LINE_CHANNEL_SECRET.splitlines()[0].strip()
+    if RAW_LINE_CHANNEL_SECRET
+    else ""
+)
 
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
@@ -99,6 +105,40 @@ SERVER_START_TIME_TEXT = time.strftime(
 
 def clamp_rate(value):
     return max(0.0, min(1.0, float(value)))
+
+
+def sanitize_text(value):
+    text = str(value)
+
+    if LINE_TOKEN:
+        text = text.replace(LINE_TOKEN, "[LINE_TOKEN_REDACTED]")
+
+    if RAW_LINE_TOKEN:
+        text = text.replace(RAW_LINE_TOKEN, "[LINE_TOKEN_REDACTED]")
+
+    if "Bearer " in text:
+        before, _, after = text.partition("Bearer ")
+        token_part = after.split("'", 1)[0].split('"', 1)[0]
+        if token_part:
+            text = text.replace(
+                "Bearer " + token_part,
+                "Bearer [LINE_TOKEN_REDACTED]"
+            )
+
+    return text[:500]
+
+
+def sanitize_for_health(value):
+    if isinstance(value, dict):
+        return {
+            key: sanitize_for_health(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_for_health(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_text(value)
+    return value
 
 
 def chaos_hit(rate):
@@ -572,7 +612,7 @@ def push_line(user_id, text):
         )
 
     except requests.RequestException as exc:
-        return False, 0, str(exc)
+        return False, 0, sanitize_text(exc)
 
     return (
         response.status_code == 200,
@@ -617,14 +657,14 @@ def push_to_all_users(text):
                 f"user={user_id} HTTP={code}"
             )
             print(
-                f"[LINE] Response={response_text}"
+                f"[LINE] Response={sanitize_text(response_text)}"
             )
 
         details.append({
             "user_id": user_id,
             "ok": ok,
             "http_code": code,
-            "response": response_text,
+            "response": sanitize_text(response_text),
         })
 
     return sent > 0, {
@@ -731,7 +771,7 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
                 time.localtime(now)
             ),
             "last_online_line_sent": bool(ok),
-            "last_online_line_result": result,
+            "last_online_line_result": sanitize_for_health(result),
         })
 
     save_heartbeat_status(status)
@@ -783,7 +823,7 @@ def check_heartbeat_watchdog():
         "อาจเกิดไฟดับ, เครื่องค้าง, Wi-Fi หลุด หรืออินเทอร์เน็ตมีปัญหา"
     )
     status["last_offline_line_sent"] = bool(ok)
-    status["last_offline_line_result"] = result
+    status["last_offline_line_result"] = sanitize_for_health(result)
     save_heartbeat_status(status)
 
 
@@ -856,7 +896,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "watchdog_state": watchdog_state(),
                 "server_start_text": SERVER_START_TIME_TEXT,
-                "watchdog": {
+                "watchdog": sanitize_for_health({
                     key: load_heartbeat_status().get(key)
                     for key in (
                         "device",
@@ -872,7 +912,7 @@ class Handler(BaseHTTPRequestHandler):
                         "last_online_line_result",
                     )
                     if key in load_heartbeat_status()
-                },
+                }),
             }
         )
 
