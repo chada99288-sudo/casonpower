@@ -694,17 +694,25 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
             if key in data
         }
 
-    save_heartbeat_status(status)
-
     if was_offline:
         print("[WATCHDOG] ESP32 กลับมาออนไลน์แล้ว")
-        push_to_all_users(
+        ok, result = push_to_all_users(
             "CASON Watchdog\n"
             "ESP32 กลับมาออนไลน์แล้ว\n"
             f"Device: {status['device']}\n"
             f"Source: {source}"
         )
+        status.update({
+            "last_online_alert": now,
+            "last_online_alert_text": time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(now)
+            ),
+            "last_online_line_sent": bool(ok),
+            "last_online_line_result": result,
+        })
 
+    save_heartbeat_status(status)
     return status
 
 
@@ -733,15 +741,18 @@ def check_heartbeat_watchdog():
         "%Y-%m-%d %H:%M:%S",
         time.localtime(now)
     )
-    save_heartbeat_status(status)
+    status["last_offline_age_seconds"] = age
 
     print(f"[WATCHDOG] ESP32 ไม่ตอบสนอง age={age}s")
-    push_to_all_users(
+    ok, result = push_to_all_users(
         "CASON Watchdog\n"
         "ESP32 ไม่ตอบสนอง\n"
         f"ไม่ได้รับ heartbeat {age} วินาที\n"
         "อาจเกิดไฟดับ, เครื่องค้าง, Wi-Fi หลุด หรืออินเทอร์เน็ตมีปัญหา"
     )
+    status["last_offline_line_sent"] = bool(ok)
+    status["last_offline_line_result"] = result
+    save_heartbeat_status(status)
 
 
 def watchdog_loop():
@@ -810,6 +821,22 @@ class Handler(BaseHTTPRequestHandler):
                 "esp32_offline_notified": bool(
                     load_heartbeat_status().get("offline_notified")
                 ),
+                "watchdog": {
+                    key: load_heartbeat_status().get(key)
+                    for key in (
+                        "device",
+                        "last_seen_text",
+                        "last_source",
+                        "last_offline_alert_text",
+                        "last_offline_age_seconds",
+                        "last_offline_line_sent",
+                        "last_offline_line_result",
+                        "last_online_alert_text",
+                        "last_online_line_sent",
+                        "last_online_line_result",
+                    )
+                    if key in load_heartbeat_status()
+                },
             }
         )
 
