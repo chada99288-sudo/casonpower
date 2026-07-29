@@ -23,6 +23,7 @@ const char *WIFI_SETUP_AP_PASSWORD = "cason1234";
 // LINE -> Webhook Server -> ESP32 polls commands
 // -----------------------------------------------------
 const char *COMMAND_SERVER_BASE_URL = "https://casonpower.onrender.com";
+const char *DEVICE_ID = "CASON-0001";
 constexpr bool COMMAND_SERVER_ENABLED = true;
 constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 3000;
 constexpr uint32_t SERVER_HEARTBEAT_INTERVAL_MS = 30000;
@@ -484,7 +485,7 @@ String buildServerEventPayload(
 {
     JsonDocument document;
 
-    document["device"] = "CASON-ESP32-01";
+    document["device"] = DEVICE_ID;
     document["controller"] = "Cason Solar Safety Controller";
     document["event"] = eventName;
     document["type"] = eventName;
@@ -1422,7 +1423,7 @@ void updateServerHeartbeat()
     http.addHeader("Connection", "close");
 
     JsonDocument document;
-    document["device"] = "CASON-ESP32-01";
+    document["device"] = DEVICE_ID;
     document["controller"] = "Cason Solar Safety Controller";
     document["uptime_seconds"] = millis() / 1000;
     document["free_heap"] = ESP.getFreeHeap();
@@ -1486,7 +1487,7 @@ void postCommandResult(
     document["command"] = command;
     document["ok"] = ok;
     document["detail"] = detail;
-    document["device"] = "CASON-ESP32-01";
+    document["device"] = DEVICE_ID;
     document["uptime_seconds"] = millis() / 1000;
 
     String payload;
@@ -1520,7 +1521,8 @@ void updateCommandPoll()
     }
 
     String url = COMMAND_SERVER_BASE_URL;
-    url += "/api/command?device=CASON-ESP32-01";
+    url += "/api/command?device=";
+    url += DEVICE_ID;
 
     WiFiClient plainClient;
     WiFiClientSecure secureClient;
