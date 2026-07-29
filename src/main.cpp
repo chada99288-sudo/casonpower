@@ -62,6 +62,7 @@ constexpr uint8_t DI2_INPUT_MODE = INPUT_PULLUP;
 constexpr uint32_t DI_DEBOUNCE_MS = 150;
 constexpr uint32_t RELAY_RESTORE_DELAY_MS = 30000;
 constexpr uint32_t HEARTBEAT_MS = 1000;
+constexpr uint32_t YELLOW_BLINK_INTERVAL_MS = 500;
 constexpr uint32_t SERVER_RETRY_DELAY_MS = 30000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 3000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 3000;
@@ -89,6 +90,9 @@ enum IndicatorState
 };
 
 IndicatorState currentIndicatorState = INDICATOR_UNKNOWN;
+
+bool yellowBlinkOn = false;
+uint32_t lastYellowBlinkTime = 0;
 
 uint32_t di1LastChangeTime = 0;
 uint32_t di2LastChangeTime = 0;
@@ -120,6 +124,7 @@ const char *di1StateText(bool active);
 void printDI1Detail(const char *prefix);
 void printDI2Detail(const char *prefix);
 void updateStatusIndicators(const char *reason);
+void updateIndicatorBlink();
 void processCommand(String command);
 void showStatus();
 void queueServerMessage(const String &eventName, const String &statusName, const String &message);
@@ -322,6 +327,8 @@ void updateStatusIndicators(const char *reason)
     }
 
     currentIndicatorState = nextState;
+    yellowBlinkOn = currentIndicatorState == INDICATOR_MINOR_FAULT;
+    lastYellowBlinkTime = millis();
 
     Serial.print("[STATUS-LIGHT] ");
     Serial.print(indicatorStateText(currentIndicatorState));
@@ -333,6 +340,24 @@ void updateStatusIndicators(const char *reason)
         currentIndicatorState == INDICATOR_MINOR_FAULT,
         currentIndicatorState == INDICATOR_MAJOR_FAULT
     );
+}
+
+void updateIndicatorBlink()
+{
+    if (currentIndicatorState != INDICATOR_MINOR_FAULT)
+    {
+        return;
+    }
+
+    if (millis() - lastYellowBlinkTime <
+        YELLOW_BLINK_INTERVAL_MS)
+    {
+        return;
+    }
+
+    lastYellowBlinkTime = millis();
+    yellowBlinkOn = !yellowBlinkOn;
+    setRelay(RELAY_CH3_YELLOW, yellowBlinkOn);
 }
 
 // =====================================================
@@ -1917,6 +1942,7 @@ void loop()
     updateDI2();
     updateAutoRestore();
     updateStatusIndicators("loop");
+    updateIndicatorBlink();
     updateWiFiPortal();
     updateCommandPoll();
     updateServerHeartbeat();
