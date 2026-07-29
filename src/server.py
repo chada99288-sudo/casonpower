@@ -1038,13 +1038,9 @@ class Handler(BaseHTTPRequestHandler):
                             user_id,
                             command
                         )
-                        push_line(
-                            user_id,
-                            (
-                                f"รับคำสั่ง {command} แล้ว\n"
-                                f"เลขคำสั่ง: {command_id}\n"
-                                "กำลังรอ ESP32 ทำงานและส่งผลกลับ"
-                            )
+                        print(
+                            f"[COMMAND] accepted without LINE ack "
+                            f"id={command_id} command={command}"
                         )
 
                     else:
