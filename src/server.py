@@ -9,6 +9,7 @@ import os
 import random
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -96,6 +97,7 @@ ALLOWED_LINE_COMMANDS = {
     "WIFI_RESET",
 }
 _last_sent = {}
+STATE_LOCK = threading.RLock()
 SERVER_START_TIME = time.time()
 SERVER_START_TIME_TEXT = time.strftime(
     "%Y-%m-%d %H:%M:%S",
@@ -128,17 +130,44 @@ def sanitize_text(value):
     return text[:500]
 
 
-def sanitize_for_health(value):
+SENSITIVE_HEALTH_KEYS = {
+    "user_id",
+    "userid",
+    "quoteToken",
+    "markAsReadToken",
+    "replyToken",
+    "response",
+}
+
+
+def sanitize_for_health(value, key_name=""):
+    if key_name in SENSITIVE_HEALTH_KEYS:
+        return "[REDACTED]"
+
     if isinstance(value, dict):
         return {
-            key: sanitize_for_health(item)
+            key: sanitize_for_health(item, key)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [sanitize_for_health(item) for item in value]
+        return [sanitize_for_health(item, key_name) for item in value]
     if isinstance(value, str):
         return sanitize_text(value)
     return value
+
+
+def write_json_file(path, data):
+    with STATE_LOCK:
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2
+            ),
+            encoding="utf-8"
+        )
+        temp_path.replace(path)
 
 
 def chaos_hit(rate):
@@ -229,26 +258,17 @@ def save_user(user_id):
     if not user_id or not user_id.startswith("U"):
         return False
 
-    users = load_users()
+    with STATE_LOCK:
+        users = load_users()
 
-    if user_id in users:
-        return False
+        if user_id in users:
+            return False
 
-    users.append(user_id)
-
-    USER_FILE.write_text(
-        json.dumps(
-            users,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
+        users.append(user_id)
+        write_json_file(USER_FILE, users)
 
     print(f"[USER] บันทึก LINE userId แล้ว: {user_id}")
     return True
-
-
 
 def load_command_queue():
     if not COMMAND_FILE.exists():
@@ -267,14 +287,7 @@ def load_command_queue():
 
 
 def save_command_queue(queue):
-    COMMAND_FILE.write_text(
-        json.dumps(
-            queue,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
+    write_json_file(COMMAND_FILE, queue)
 
 
 def load_command_results():
@@ -294,18 +307,11 @@ def load_command_results():
 
 
 def save_command_result(result):
-    results = load_command_results()
-    results.append(result)
-    results = results[-100:]
-    COMMAND_RESULT_FILE.write_text(
-        json.dumps(
-            results,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
-
+    with STATE_LOCK:
+        results = load_command_results()
+        results.append(result)
+        results = results[-100:]
+        write_json_file(COMMAND_RESULT_FILE, results)
 
 def load_inflight_commands():
     if not COMMAND_INFLIGHT_FILE.exists():
@@ -327,14 +333,7 @@ def load_inflight_commands():
 
 
 def save_inflight_commands(commands):
-    COMMAND_INFLIGHT_FILE.write_text(
-        json.dumps(
-            commands,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
+    write_json_file(COMMAND_INFLIGHT_FILE, commands)
 
 
 def remember_inflight_command(command):
@@ -343,16 +342,16 @@ def remember_inflight_command(command):
     if not command_id:
         return
 
-    commands = load_inflight_commands()
-    commands[command_id] = command
+    with STATE_LOCK:
+        commands = load_inflight_commands()
+        commands[command_id] = command
 
-    # เก็บเฉพาะคำสั่งล่าสุด ป้องกันไฟล์โตถ้า ESP32 ไม่ส่งผลกลับ
-    items = sorted(
-        commands.items(),
-        key=lambda item: int(item[1].get("created_at", 0))
-    )[-50:]
-    save_inflight_commands(dict(items))
-
+        # เก็บเฉพาะคำสั่งล่าสุด ป้องกันไฟล์โตถ้า ESP32 ไม่ส่งผลกลับ
+        items = sorted(
+            commands.items(),
+            key=lambda item: int(item[1].get("created_at", 0))
+        )[-50:]
+        save_inflight_commands(dict(items))
 
 def pop_inflight_command(command_id):
     command_id = str(command_id or "")
@@ -360,11 +359,12 @@ def pop_inflight_command(command_id):
     if not command_id:
         return {}
 
-    commands = load_inflight_commands()
-    command = commands.pop(command_id, {})
-    save_inflight_commands(commands)
-    return command
+    with STATE_LOCK:
+        commands = load_inflight_commands()
+        command = commands.pop(command_id, {})
+        save_inflight_commands(commands)
 
+    return command
 
 def build_command_result_message(command, ok, detail):
     command = str(command or "").upper()
@@ -429,18 +429,19 @@ def normalize_line_command(text):
 
 
 def enqueue_line_command(user_id, command):
-    queue = load_command_queue()
-    command_id = str(int(time.time() * 1000))
+    command_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
 
-    queue.append({
-        "id": command_id,
-        "command": command,
-        "user_id": user_id,
-        "created_at": int(time.time()),
-    })
+    with STATE_LOCK:
+        queue = load_command_queue()
+        queue.append({
+            "id": command_id,
+            "command": command,
+            "user_id": user_id,
+            "created_at": int(time.time()),
+        })
 
-    queue = queue[-20:]
-    save_command_queue(queue)
+        queue = queue[-20:]
+        save_command_queue(queue)
 
     print(
         f"[COMMAND] queued id={command_id} "
@@ -448,18 +449,18 @@ def enqueue_line_command(user_id, command):
     )
     return command_id
 
-
 def pop_next_command():
-    queue = load_command_queue()
+    with STATE_LOCK:
+        queue = load_command_queue()
 
-    if not queue:
-        return None
+        if not queue:
+            return None
 
-    command = queue.pop(0)
-    save_command_queue(queue)
-    remember_inflight_command(command)
+        command = queue.pop(0)
+        save_command_queue(queue)
+        remember_inflight_command(command)
+
     return command
-
 
 def verify_line_signature(raw_body, received_signature):
     if not LINE_CHANNEL_SECRET:
@@ -691,14 +692,7 @@ def load_heartbeat_status():
 
 
 def save_heartbeat_status(status):
-    HEARTBEAT_FILE.write_text(
-        json.dumps(
-            status,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
+    write_json_file(HEARTBEAT_FILE, status)
 
 
 def heartbeat_seen(status=None):
