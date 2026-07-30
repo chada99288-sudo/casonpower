@@ -156,6 +156,13 @@ def sanitize_for_health(value, key_name=""):
     return value
 
 
+def display_value(value, fallback="-"):
+    if value is None or value == "":
+        return fallback
+
+    return str(value)
+
+
 def write_json_file(path, data):
     with STATE_LOCK:
         temp_path = path.with_suffix(path.suffix + ".tmp")
@@ -526,6 +533,8 @@ def build_line_message(data):
 
     di1_raw = data.get("di1_raw", "-")
     di2_raw = data.get("di2_raw", "-")
+    rtc_time = display_value(data.get("rtc_time"))
+    rtc_status = display_value(data.get("rtc_status"))
 
     alarm = (
         "YES"
@@ -557,6 +566,8 @@ def build_line_message(data):
         f"Relay CH1: {relay1}",
         f"Sound CH5: {relay5_sound}",
         f"Alarm Lock: {alarm}",
+        f"RTC: {rtc_status}",
+        f"เวลา RTC: {rtc_time}",
         "",
         message,
     ])
@@ -742,6 +753,10 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
                 "relay1_on",
                 "alarm_active",
                 "uptime_seconds",
+                "rtc_available",
+                "rtc_status",
+                "rtc_time",
+                "rtc_set_from_build_time",
                 "free_heap",
                 "wifi",
                 "ip",
@@ -1486,4 +1501,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

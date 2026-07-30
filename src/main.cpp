@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <RTClib.h>
 
 // =====================================================
 // CASON SOLAR SAFETY CONTROLLER
@@ -105,6 +106,9 @@ bool wifiResetPending = false;
 uint32_t wifiResetRequestTime = 0;
 
 WiFiManager wifiManager;
+RTC_DS3231 rtc;
+bool rtcAvailable = false;
+bool rtcSetFromBuildTime = false;
 
 // คิวเหตุการณ์ที่จะส่งผ่าน Render ไป LINE
 String pendingEvent;
@@ -134,6 +138,9 @@ bool checkCommandServer();
 bool isRelayControllerOnline();
 bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url);
 bool isImportantLineEvent(const String &eventName);
+void rtcBegin();
+String rtcTimestamp();
+String rtcStatusText();
 
 // =====================================================
 // TCA9554
@@ -226,6 +233,73 @@ bool tcaBegin()
 
     Serial.println("[RELAY] All relays OFF");
     return true;
+}
+
+// =====================================================
+// RTC DS3231
+// =====================================================
+
+void rtcBegin()
+{
+    rtcAvailable = rtc.begin();
+    rtcSetFromBuildTime = false;
+
+    if (!rtcAvailable)
+    {
+        Serial.println("[RTC] DS3231 not found");
+        return;
+    }
+
+    Serial.println("[RTC] DS3231 found");
+
+    if (rtc.lostPower())
+    {
+        Serial.println("[RTC] Lost power; setting time from firmware build");
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        rtcSetFromBuildTime = true;
+    }
+
+    Serial.print("[RTC] Time: ");
+    Serial.println(rtcTimestamp());
+}
+
+String rtcTimestamp()
+{
+    if (!rtcAvailable)
+    {
+        return "RTC_NOT_AVAILABLE";
+    }
+
+    DateTime now = rtc.now();
+    char buffer[24];
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "%04d-%02d-%02d %02d:%02d:%02d",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
+
+    return String(buffer);
+}
+
+String rtcStatusText()
+{
+    if (!rtcAvailable)
+    {
+        return "NOT_FOUND";
+    }
+
+    if (rtcSetFromBuildTime)
+    {
+        return "SET_FROM_BUILD_TIME";
+    }
+
+    return "OK";
 }
 
 // =====================================================
@@ -528,6 +602,10 @@ String buildServerEventPayload(
     document["restore_pending"] = relayRestorePending;
     document["uptime_ms"] = millis();
     document["uptime_seconds"] = millis() / 1000;
+    document["rtc_available"] = rtcAvailable;
+    document["rtc_status"] = rtcStatusText();
+    document["rtc_time"] = rtcTimestamp();
+    document["rtc_set_from_build_time"] = rtcSetFromBuildTime;
     document["free_heap"] = ESP.getFreeHeap();
     document["wifi"] = WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED";
 
@@ -1247,6 +1325,8 @@ String buildStatusMessage()
     message += indicatorStateText(currentIndicatorState);
     message += "\nLINE Queue: ";
     message += serverMessagePending ? "PENDING" : "EMPTY";
+    message += "\nRTC: " + rtcStatusText();
+    message += "\nเวลา RTC: " + rtcTimestamp();
     message += "\nUptime: " + String(millis() / 1000) + " วินาที";
 
     return message;
@@ -1344,6 +1424,8 @@ String buildSystemCheckMessage()
     message += serverMessagePending ? "PENDING" : "EMPTY";
     message += "\nStatus Light: ";
     message += indicatorStateText(currentIndicatorState);
+    message += "\nRTC: " + rtcStatusText();
+    message += "\nเวลา RTC: " + rtcTimestamp();
     message += "\nFree Heap: " + String(ESP.getFreeHeap());
 
     if (!allOk)
@@ -1535,6 +1617,10 @@ void updateServerHeartbeat()
     document["device"] = DEVICE_ID;
     document["controller"] = "Cason Solar Safety Controller";
     document["uptime_seconds"] = millis() / 1000;
+    document["rtc_available"] = rtcAvailable;
+    document["rtc_status"] = rtcStatusText();
+    document["rtc_time"] = rtcTimestamp();
+    document["rtc_set_from_build_time"] = rtcSetFromBuildTime;
     document["free_heap"] = ESP.getFreeHeap();
     document["di1_raw"] = readDI1Raw();
     document["di1_active"] = di1Active;
@@ -1829,6 +1915,8 @@ void setup()
             delay(100);
         }
     }
+
+    rtcBegin();
 
     // Fail-safe:
     // ถ้า DI1 NC ปิดปกติ ให้เปิด Relay CH1
