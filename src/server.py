@@ -270,6 +270,7 @@ def save_user(user_id):
     print(f"[USER] บันทึก LINE userId แล้ว: {user_id}")
     return True
 
+
 def load_command_queue():
     if not COMMAND_FILE.exists():
         return []
@@ -313,6 +314,7 @@ def save_command_result(result):
         results = results[-100:]
         write_json_file(COMMAND_RESULT_FILE, results)
 
+
 def load_inflight_commands():
     if not COMMAND_INFLIGHT_FILE.exists():
         return {}
@@ -352,6 +354,7 @@ def remember_inflight_command(command):
             key=lambda item: int(item[1].get("created_at", 0))
         )[-50:]
         save_inflight_commands(dict(items))
+
 
 def pop_inflight_command(command_id):
     command_id = str(command_id or "")
@@ -421,6 +424,7 @@ def enqueue_line_command(user_id, command):
         f"command={command} user={user_id}"
     )
     return command_id
+
 
 def pop_next_command():
     with STATE_LOCK:
@@ -515,7 +519,13 @@ def build_line_message(data):
         or "-"
     )
 
+    relay5_sound = str(
+        data.get("relay5_sound")
+        or ("ON" if data.get("sound_active") else "OFF")
+    )
+
     di1_raw = data.get("di1_raw", "-")
+    di2_raw = data.get("di2_raw", "-")
 
     alarm = (
         "YES"
@@ -543,7 +553,9 @@ def build_line_message(data):
         f"สถานะ: {status}",
         f"แหล่งสัญญาณ: {source}",
         f"DI1 RAW: {di1_raw}",
+        f"DI2 RAW: {di2_raw}",
         f"Relay CH1: {relay1}",
+        f"Sound CH5: {relay5_sound}",
         f"Alarm Lock: {alarm}",
         "",
         message,
@@ -837,7 +849,7 @@ def watchdog_loop():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CasonLineServer/3.0"
+    server_version = "CasonLineServer/4.0"
 
     def log_message(self, fmt, *args):
         print("HTTP: " + (fmt % args))
@@ -1179,8 +1191,8 @@ class Handler(BaseHTTPRequestHandler):
             f"ok={data.get('ok')}"
         )
 
-        # ESP32 ส่งข้อความผลลัพธ์จริงเข้า LINE เองผ่าน LINE Direct
-        # จึงไม่ push ผลซ้ำจาก server ตรงนี้ เพื่อไม่ให้ LINE แสดงข้อความซ้ำกัน
+        # ESP32 จะ queue event ผลลัพธ์กลับมาที่ server เอง
+        # จึงไม่ push acknowledgement ซ้ำจาก endpoint นี้
         if user_id:
             print(
                 f"[COMMAND] result notification suppressed "

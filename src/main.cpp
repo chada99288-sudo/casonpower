@@ -9,7 +9,8 @@
 // =====================================================
 // CASON SOLAR SAFETY CONTROLLER
 // ESP32 -> RENDER -> LINE
-// RELAY CH1 + DIGITAL INPUT 1
+// CH1 power, CH2 green, CH3 yellow, CH4 red, CH5 sound
+// DI1 safety NC, DI2 warning NC
 // =====================================================
 
 // -----------------------------------------------------
@@ -48,9 +49,9 @@ constexpr uint8_t RELAY_CH4_RED = 4;
 constexpr uint8_t RELAY_CH5_SOUND = 5;
 
 // -----------------------------------------------------
-// Digital Input
+// Digital Inputs
 // DI1: safety alarm NC, normal LOW, active HIGH
-// DI2: dry contact NC, normal LOW, active HIGH
+// DI2: warning dry contact NC, normal LOW, active HIGH
 // -----------------------------------------------------
 constexpr uint8_t DI1_PIN = 4;
 constexpr uint8_t DI1_ACTIVE_LEVEL = HIGH;
@@ -518,9 +519,11 @@ String buildServerEventPayload(
     document["di1_active"] = di1Active;
     document["di2_raw"] = readDI2Raw();
     document["di2_active"] = di2Active;
-    document["relay_channel"] = 1;
+    document["relay_channel"] = RELAY_CH1_POWER;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
+    document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
+    document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
     document["alarm_active"] = alarmActive;
     document["restore_pending"] = relayRestorePending;
     document["uptime_ms"] = millis();
@@ -604,15 +607,6 @@ bool sendEventToRender(
     return httpCode >= 200 && httpCode < 300;
 }
 
-bool sendQueuedEventToRender(
-    const String &eventName,
-    const String &statusName,
-    const String &message)
-{
-    return sendEventToRender(eventName, statusName, message);
-}
-
-
 bool isImportantLineEvent(const String &eventName)
 {
     return eventName == "FAULT" ||
@@ -676,7 +670,7 @@ void updateServerQueue()
         "[SERVER] Sending queued event..."
     );
 
-    if (sendQueuedEventToRender(
+    if (sendEventToRender(
             pendingEvent,
             pendingStatus,
             pendingMessage))
@@ -813,7 +807,7 @@ void activateDI1Alarm()
     );
 
     // ตัดรีเลย์ก่อนทำงานด้านเครือข่าย
-    setRelay(1, false);
+    setRelay(RELAY_CH1_POWER, false);
 
     queueServerMessage(
         "FAULT",
@@ -943,7 +937,7 @@ void updateAutoRestore()
         String("\nUptime: ") + String(millis() / 1000) +
         " วินาที";
 
-    if (setRelay(1, true))
+    if (setRelay(RELAY_CH1_POWER, true))
     {
         Serial.println(
             "[SERVER] Queuing RECOVERY after restore delay"
@@ -1030,6 +1024,11 @@ void showStatus()
         relay1On ? "ON" : "OFF"
     );
 
+    Serial.print("Sound CH5   : ");
+    Serial.println(
+        currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF"
+    );
+
     Serial.print("Alarm       : ");
     Serial.println(
         alarmActive
@@ -1083,7 +1082,7 @@ void processCommand(String command)
 
     if (command == "ON")
     {
-        if (alarmActive || di1Active)
+        if (alarmActive || di1Active || readDI1())
         {
             Serial.println(
                 "[ON] Refused: Alarm/DI1 active"
@@ -1091,7 +1090,7 @@ void processCommand(String command)
             return;
         }
 
-        if (setRelay(1, true))
+        if (setRelay(RELAY_CH1_POWER, true))
         {
             queueServerMessage(
                 "RELAY_ON",
@@ -1102,7 +1101,7 @@ void processCommand(String command)
     }
     else if (command == "OFF")
     {
-        if (setRelay(1, false))
+        if (setRelay(RELAY_CH1_POWER, false))
         {
             queueServerMessage(
                 "RELAY_OFF",
@@ -1211,7 +1210,7 @@ void processCommand(String command)
             "WIFI_RESET - ล้างค่า Wi-Fi"
         );
         Serial.println(
-            "RAW    - อ่านค่าดิบ DI1"
+            "RAW    - อ่านค่าดิบ DI1/DI2"
         );
         Serial.println(
             "HELP   - แสดงคำสั่ง"
@@ -1238,6 +1237,8 @@ String buildStatusMessage()
     message += "\nDI2: " + String(di1StateText(di2Active));
     message += "\nRelay CH1: ";
     message += relay1On ? "ON" : "OFF";
+    message += "\nSound CH5: ";
+    message += currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     message += "\nAlarm: ";
     message += alarmActive ? "ACTIVE" : "NORMAL";
     message += "\nRestore: ";
@@ -1332,6 +1333,8 @@ String buildSystemCheckMessage()
     message += di2StateNormal ? "NORMAL" : "ACTIVE";
     message += "\nRelay CH1: ";
     message += relay1On ? "ON" : "OFF";
+    message += "\nSound CH5: ";
+    message += currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     message += "\nRelay Logic: " + okText(relayStateOk);
     message += "\nAlarm: ";
     message += alarmActive ? "ACTIVE" : "NORMAL";
@@ -1345,7 +1348,7 @@ String buildSystemCheckMessage()
 
     if (!allOk)
     {
-        message += "\nหมายเหตุ: DI1 เป็น alarm สีแดง, DI2 เป็น dry contact NC สีเหลือง";
+        message += "\nหมายเหตุ: DI1 เป็น alarm สีแดงพร้อมเสียง CH5, DI2 เป็น dry contact NC สีเหลือง";
     }
 
     return message;
@@ -1406,7 +1409,7 @@ bool executeRemoteCommand(const String &command)
             return false;
         }
 
-        if (setRelay(1, true))
+        if (setRelay(RELAY_CH1_POWER, true))
         {
             queueServerMessage(
                 "RELAY_ON",
@@ -1426,7 +1429,7 @@ bool executeRemoteCommand(const String &command)
 
     if (command == "OFF")
     {
-        if (setRelay(1, false))
+        if (setRelay(RELAY_CH1_POWER, false))
         {
             queueServerMessage(
                 "RELAY_OFF",
@@ -1539,6 +1542,8 @@ void updateServerHeartbeat()
     document["di2_active"] = di2Active;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
+    document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
+    document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
     document["alarm_active"] = alarmActive;
     document["restore_pending"] = relayRestorePending;
     document["line_queue_pending"] = serverMessagePending;
@@ -1831,7 +1836,7 @@ void setup()
     if (di1Active)
     {
         alarmActive = true;
-        setRelay(1, false);
+        setRelay(RELAY_CH1_POWER, false);
 
         Serial.println();
         Serial.println(
@@ -1851,7 +1856,7 @@ void setup()
     {
         alarmActive = false;
 
-        if (!setRelay(1, true))
+        if (!setRelay(RELAY_CH1_POWER, true))
         {
             Serial.println(
                 "[SYSTEM] Failed to turn Relay CH1 ON"
