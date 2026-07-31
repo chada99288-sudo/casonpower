@@ -583,39 +583,32 @@ String buildServerEventPayload(
     document["type"] = eventName;
     document["status"] = statusName;
     document["message"] = message;
-    document["detail"] = message;
     document["active"] = statusName == "ACTIVE";
     document["source"] = "DI1";
-    document["sensor"] = "Digital Input 1";
-    document["channel"] = 1;
-    document["di_channel"] = 1;
     document["di1_raw"] = readDI1Raw();
     document["di1_active"] = di1Active;
     document["di2_raw"] = readDI2Raw();
     document["di2_active"] = di2Active;
-    document["relay_channel"] = RELAY_CH1_POWER;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
     document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
     document["alarm_active"] = alarmActive;
     document["restore_pending"] = relayRestorePending;
-    document["uptime_ms"] = millis();
     document["uptime_seconds"] = millis() / 1000;
     document["rtc_available"] = rtcAvailable;
     document["rtc_status"] = rtcStatusText();
-    document["rtc_time"] = rtcTimestamp();
     document["rtc_set_from_build_time"] = rtcSetFromBuildTime;
     document["free_heap"] = ESP.getFreeHeap();
     document["wifi"] = WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED";
 
     if (WiFi.status() == WL_CONNECTED)
     {
-        document["esp32_ip"] = WiFi.localIP().toString();
         document["ip"] = WiFi.localIP().toString();
     }
 
     String payload;
+    payload.reserve(768);
     serializeJson(document, payload);
 
     return payload;
@@ -1610,7 +1603,6 @@ void updateServerHeartbeat()
     document["uptime_seconds"] = millis() / 1000;
     document["rtc_available"] = rtcAvailable;
     document["rtc_status"] = rtcStatusText();
-    document["rtc_time"] = rtcTimestamp();
     document["rtc_set_from_build_time"] = rtcSetFromBuildTime;
     document["free_heap"] = ESP.getFreeHeap();
     document["di1_raw"] = readDI1Raw();
@@ -1628,6 +1620,7 @@ void updateServerHeartbeat()
     document["ip"] = WiFi.localIP().toString();
 
     String payload;
+    payload.reserve(640);
     serializeJson(document, payload);
 
     const int code = http.POST(payload);
@@ -1678,9 +1671,9 @@ void postCommandResult(
     document["ok"] = ok;
     document["detail"] = detail;
     document["device"] = DEVICE_ID;
-    document["uptime_seconds"] = millis() / 1000;
 
     String payload;
+    payload.reserve(256);
     serializeJson(document, payload);
 
     const int code = http.POST(payload);
