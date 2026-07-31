@@ -550,7 +550,6 @@ def build_line_message(data):
     di1_raw = data.get("di1_raw", "-")
     di2_raw = data.get("di2_raw", "-")
     update_time = display_value(data.get("server_time") or local_time_text())
-    rtc_time = display_value(data.get("rtc_time"))
     rtc_status = display_value(data.get("rtc_status"))
 
     alarm = (
@@ -585,7 +584,6 @@ def build_line_message(data):
         f"Alarm Lock: {alarm}",
         f"RTC: {rtc_status}",
         f"เวลาอัปเดต: {update_time}",
-        f"เวลาอุปกรณ์ (RTC): {rtc_time}",
         "",
         message,
     ])

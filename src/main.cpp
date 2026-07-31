@@ -1011,10 +1011,6 @@ void updateAutoRestore()
         "[SYSTEM] Auto restoring Relay CH1"
     );
 
-    const String recoveryStamp =
-        String("\nUptime: ") + String(millis() / 1000) +
-        " วินาที";
-
     if (setRelay(RELAY_CH1_POWER, true))
     {
         Serial.println(
@@ -1023,8 +1019,7 @@ void updateAutoRestore()
         const String recoveryMessage =
             String("Digital Input 1 กลับสู่สถานะปกติครบ 30 วินาทีแล้ว\n") +
             "Relay CH1 ถูกสั่ง ON อัตโนมัติ\n" +
-            "ระบบกลับมาทำงานตามปกติ" +
-            recoveryStamp;
+            "ระบบกลับมาทำงานตามปกติ";
 
         queueServerMessage(
             "RECOVERY",
@@ -1037,8 +1032,7 @@ void updateAutoRestore()
         const String recoveryMessage =
             String("Digital Input 1 กลับสู่สถานะปกติครบ 30 วินาทีแล้ว\n") +
             "แต่สั่ง Relay CH1 ON ไม่สำเร็จ\n" +
-            "กรุณาตรวจสอบ Relay Controller" +
-            recoveryStamp;
+            "กรุณาตรวจสอบ Relay Controller";
 
         queueServerMessage(
             "RECOVERY",
@@ -1326,8 +1320,6 @@ String buildStatusMessage()
     message += "\nLINE Queue: ";
     message += serverMessagePending ? "PENDING" : "EMPTY";
     message += "\nRTC: " + rtcStatusText();
-    message += "\nเวลาอุปกรณ์ (RTC): " + rtcTimestamp();
-    message += "\nUptime: " + String(millis() / 1000) + " วินาที";
 
     return message;
 }
@@ -1425,7 +1417,6 @@ String buildSystemCheckMessage()
     message += "\nStatus Light: ";
     message += indicatorStateText(currentIndicatorState);
     message += "\nRTC: " + rtcStatusText();
-    message += "\nเวลาอุปกรณ์ (RTC): " + rtcTimestamp();
     message += "\nFree Heap: " + String(ESP.getFreeHeap());
 
     if (!allOk)
