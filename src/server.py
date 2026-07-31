@@ -66,6 +66,14 @@ HEARTBEAT_CHECK_INTERVAL_SECONDS = int(
     os.getenv("CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS", "30")
 )
 CASON_TIMEZONE = os.getenv("CASON_TIMEZONE", "Asia/Bangkok")
+CASON_AUTO_SAVE_LINE_USERS = (
+    os.getenv("CASON_AUTO_SAVE_LINE_USERS", "0") == "1"
+)
+CASON_ALLOWED_LINE_USER_IDS = {
+    item.strip()
+    for item in os.getenv("CASON_ALLOWED_LINE_USER_IDS", "").split(",")
+    if item.strip()
+}
 
 DUPLICATE_BLOCK_SECONDS = int(
     os.getenv("CASON_DUPLICATE_BLOCK_SECONDS", "300")
@@ -294,6 +302,9 @@ def save_user(user_id):
     if not user_id or not user_id.startswith("U"):
         return False
 
+    if not CASON_AUTO_SAVE_LINE_USERS:
+        return False
+
     with STATE_LOCK:
         users = load_users()
 
@@ -406,7 +417,13 @@ def pop_inflight_command(command_id):
     return command
 
 def is_authorized_command_user(user_id):
-    return bool(user_id) and user_id in set(load_users())
+    if not user_id:
+        return False
+
+    if CASON_ALLOWED_LINE_USER_IDS:
+        return user_id in CASON_ALLOWED_LINE_USER_IDS
+
+    return user_id in set(load_users())
 
 
 def normalize_line_command(text):
@@ -1102,6 +1119,16 @@ class Handler(BaseHTTPRequestHandler):
             event_type = event.get("type")
 
             if event_type == "follow" and user_id:
+                if not is_authorized_command_user(user_id):
+                    push_line(
+                        user_id,
+                        (
+                            "เชื่อมต่อกับระบบแล้ว แต่ยังไม่ได้รับอนุญาต"
+                            "ให้สั่งงาน"
+                        )
+                    )
+                    continue
+
                 push_line(
                     user_id,
                     (
