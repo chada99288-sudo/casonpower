@@ -580,7 +580,10 @@ def build_line_message(data):
     di1_raw = data.get("di1_raw", "-")
     di2_raw = data.get("di2_raw", "-")
     update_time = display_value(data.get("server_time") or local_time_text())
-    rtc_status = display_value(data.get("rtc_status"))
+    clock_status = display_value(
+        data.get("clock_status")
+        or data.get("rtc_status")
+    )
 
     alarm = (
         "YES"
@@ -617,8 +620,8 @@ def build_line_message(data):
         message,
     ]
 
-    if rtc_status != "-":
-        lines.insert(-3, f"RTC: {rtc_status}")
+    if clock_status not in {"-", "NOT_FOUND"}:
+        lines.insert(-3, f"นาฬิกาเครื่อง: {clock_status}")
 
     text = "\n".join(lines)
 
@@ -803,6 +806,8 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
                 "relay1_on",
                 "alarm_active",
                 "uptime_seconds",
+                "clock_status",
+                "clock_time",
                 "rtc_available",
                 "rtc_status",
                 "rtc_time",

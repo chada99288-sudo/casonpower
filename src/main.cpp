@@ -5,7 +5,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
-#include <RTClib.h>
+#include <time.h>
 
 // =====================================================
 // CASON SOLAR SAFETY CONTROLLER
@@ -68,6 +68,11 @@ constexpr uint32_t HEARTBEAT_MS = 1000;
 constexpr uint32_t SERVER_RETRY_DELAY_MS = 30000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 3000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 3000;
+constexpr uint32_t CLOCK_SYNC_CHECK_INTERVAL_MS = 60000;
+
+const char *NTP_SERVER_1 = "pool.ntp.org";
+const char *NTP_SERVER_2 = "time.nist.gov";
+const char *TIMEZONE_POSIX = "ICT-7";
 
 // -----------------------------------------------------
 // ตัวแปรระบบ
@@ -101,14 +106,14 @@ uint32_t lastCommandPollTime = 0;
 uint32_t lastServerHeartbeatTime = 0;
 uint32_t lastWiFiPortalTime = 0;
 uint32_t lastWiFiConnectAttemptTime = 0;
+uint32_t lastClockSyncCheckTime = 0;
 bool wifiSetupPortalRunning = false;
 bool wifiResetPending = false;
 uint32_t wifiResetRequestTime = 0;
 
 WiFiManager wifiManager;
-RTC_DS3231 rtc;
-bool rtcAvailable = false;
-bool rtcSetFromBuildTime = false;
+bool clockConfigured = false;
+bool clockSynced = false;
 
 // คิวเหตุการณ์ที่จะส่งผ่าน Render ไป LINE
 String pendingEvent;
@@ -138,9 +143,10 @@ bool checkCommandServer();
 bool isRelayControllerOnline();
 bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url);
 bool isImportantLineEvent(const String &eventName);
-void rtcBegin();
-String rtcTimestamp();
-String rtcStatusText();
+void internalClockBegin();
+void updateInternalClock();
+String internalClockTimestamp();
+String internalClockStatusText();
 
 // =====================================================
 // TCA9554
@@ -236,70 +242,97 @@ bool tcaBegin()
 }
 
 // =====================================================
-// RTC DS3231
+// Internal Clock
 // =====================================================
 
-void rtcBegin()
+void internalClockBegin()
 {
-    rtcAvailable = rtc.begin();
-    rtcSetFromBuildTime = false;
-
-    if (!rtcAvailable)
+    if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("[RTC] DS3231 not found");
+        clockSynced = false;
         return;
     }
 
-    Serial.println("[RTC] DS3231 found");
-
-    if (rtc.lostPower())
+    if (!clockConfigured)
     {
-        Serial.println("[RTC] Lost power; setting time from firmware build");
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-        rtcSetFromBuildTime = true;
+        configTzTime(
+            TIMEZONE_POSIX,
+            NTP_SERVER_1,
+            NTP_SERVER_2
+        );
+        clockConfigured = true;
+        lastClockSyncCheckTime =
+            millis() - CLOCK_SYNC_CHECK_INTERVAL_MS;
+        Serial.println("[CLOCK] NTP sync configured");
     }
 
-    Serial.print("[RTC] Time: ");
-    Serial.println(rtcTimestamp());
+    updateInternalClock();
 }
 
-String rtcTimestamp()
+void updateInternalClock()
 {
-    if (!rtcAvailable)
+    if (WiFi.status() != WL_CONNECTED)
     {
-        return "RTC_NOT_AVAILABLE";
+        clockSynced = false;
+        return;
     }
 
-    DateTime now = rtc.now();
+    if (millis() - lastClockSyncCheckTime <
+        CLOCK_SYNC_CHECK_INTERVAL_MS)
+    {
+        return;
+    }
+
+    lastClockSyncCheckTime = millis();
+
+    struct tm timeInfo;
+    clockSynced = getLocalTime(&timeInfo, 50);
+
+    if (clockSynced)
+    {
+        Serial.print("[CLOCK] Time: ");
+        Serial.println(internalClockTimestamp());
+    }
+    else
+    {
+        Serial.println("[CLOCK] Waiting for NTP sync");
+    }
+}
+
+String internalClockTimestamp()
+{
+    struct tm timeInfo;
+
+    if (!getLocalTime(&timeInfo, 50))
+    {
+        return "TIME_NOT_SYNCED";
+    }
+
     char buffer[24];
-    snprintf(
+    strftime(
         buffer,
         sizeof(buffer),
-        "%04d-%02d-%02d %02d:%02d:%02d",
-        now.year(),
-        now.month(),
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second()
+        "%Y-%m-%d %H:%M:%S",
+        &timeInfo
     );
 
     return String(buffer);
 }
 
-String rtcStatusText()
+String internalClockStatusText()
 {
-    if (!rtcAvailable)
+    if (clockSynced || internalClockTimestamp() != "TIME_NOT_SYNCED")
     {
-        return "NOT_FOUND";
+        clockSynced = true;
+        return "SYNCED";
     }
 
-    if (rtcSetFromBuildTime)
+    if (WiFi.status() == WL_CONNECTED)
     {
-        return "SET_FROM_BUILD_TIME";
+        return "SYNC_PENDING";
     }
 
-    return "OK";
+    return "WAITING_WIFI";
 }
 
 // =====================================================
@@ -596,9 +629,8 @@ String buildServerEventPayload(
     document["alarm_active"] = alarmActive;
     document["restore_pending"] = relayRestorePending;
     document["uptime_seconds"] = millis() / 1000;
-    document["rtc_available"] = rtcAvailable;
-    document["rtc_status"] = rtcStatusText();
-    document["rtc_set_from_build_time"] = rtcSetFromBuildTime;
+    document["clock_status"] = internalClockStatusText();
+    document["clock_time"] = internalClockTimestamp();
     document["free_heap"] = ESP.getFreeHeap();
     document["wifi"] = WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED";
 
@@ -1312,7 +1344,7 @@ String buildStatusMessage()
     message += indicatorStateText(currentIndicatorState);
     message += "\nLINE Queue: ";
     message += serverMessagePending ? "PENDING" : "EMPTY";
-    message += "\nRTC: " + rtcStatusText();
+    message += "\nClock: " + internalClockStatusText();
 
     return message;
 }
@@ -1409,7 +1441,7 @@ String buildSystemCheckMessage()
     message += serverMessagePending ? "PENDING" : "EMPTY";
     message += "\nStatus Light: ";
     message += indicatorStateText(currentIndicatorState);
-    message += "\nRTC: " + rtcStatusText();
+    message += "\nClock: " + internalClockStatusText();
     message += "\nFree Heap: " + String(ESP.getFreeHeap());
 
     if (!allOk)
@@ -1601,9 +1633,8 @@ void updateServerHeartbeat()
     document["device"] = DEVICE_ID;
     document["controller"] = "Cason Solar Safety Controller";
     document["uptime_seconds"] = millis() / 1000;
-    document["rtc_available"] = rtcAvailable;
-    document["rtc_status"] = rtcStatusText();
-    document["rtc_set_from_build_time"] = rtcSetFromBuildTime;
+    document["clock_status"] = internalClockStatusText();
+    document["clock_time"] = internalClockTimestamp();
     document["free_heap"] = ESP.getFreeHeap();
     document["di1_raw"] = readDI1Raw();
     document["di1_active"] = di1Active;
@@ -1900,8 +1931,6 @@ void setup()
         }
     }
 
-    rtcBegin();
-
     // Fail-safe:
     // ถ้า DI1 NC ปิดปกติ ให้เปิด Relay CH1
     // ถ้า DI1 เปิดวงจร/ผิดปกติตั้งแต่เปิดเครื่อง ให้ Relay CH1 คง OFF
@@ -1943,6 +1972,7 @@ void setup()
         Serial.println(
             "[SYSTEM] Wi-Fi ready"
         );
+        internalClockBegin();
     }
     else
     {
@@ -1999,6 +2029,7 @@ void loop()
     updateAutoRestore();
     updateStatusIndicators("loop");
     updateWiFiPortal();
+    updateInternalClock();
     updateCommandPoll();
     updateServerHeartbeat();
     updateHeartbeat();
