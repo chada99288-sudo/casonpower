@@ -170,6 +170,19 @@ def display_value(value, fallback="-"):
     return str(value)
 
 
+def clean_line_detail(text):
+    lines = []
+
+    for line in str(text).splitlines():
+        if line.strip().lower().startswith("uptime:"):
+            continue
+
+        lines.append(line)
+
+    cleaned = "\n".join(lines).strip()
+    return cleaned or "ไม่มีรายละเอียด"
+
+
 def local_time_text():
     if ZoneInfo:
         tz = ZoneInfo(CASON_TIMEZONE)
@@ -532,7 +545,7 @@ def build_line_message(data):
         or "-"
     )
 
-    message = str(
+    message = clean_line_detail(
         data.get("message")
         or "ไม่มีรายละเอียด"
     )
@@ -570,7 +583,7 @@ def build_line_message(data):
     else:
         title = "ℹ️ CASON SYSTEM EVENT"
 
-    text = "\n".join([
+    lines = [
         title,
         f"ระบบ: {controller}",
         f"อุปกรณ์: {device}",
@@ -582,11 +595,15 @@ def build_line_message(data):
         f"Relay CH1: {relay1}",
         f"Sound CH5: {relay5_sound}",
         f"Alarm Lock: {alarm}",
-        f"RTC: {rtc_status}",
         f"เวลาอัปเดต: {update_time}",
         "",
         message,
-    ])
+    ]
+
+    if rtc_status != "-":
+        lines.insert(-3, f"RTC: {rtc_status}")
+
+    text = "\n".join(lines)
 
     return text[:5000]
 
