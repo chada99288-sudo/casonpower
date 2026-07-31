@@ -10,9 +10,15 @@ import random
 import threading
 import time
 import uuid
+from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 import requests
 from dotenv import load_dotenv
@@ -59,6 +65,7 @@ HEARTBEAT_RETRY_FAILED_ALERT_SECONDS = int(
 HEARTBEAT_CHECK_INTERVAL_SECONDS = int(
     os.getenv("CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS", "30")
 )
+CASON_TIMEZONE = os.getenv("CASON_TIMEZONE", "Asia/Bangkok")
 
 DUPLICATE_BLOCK_SECONDS = int(
     os.getenv("CASON_DUPLICATE_BLOCK_SECONDS", "300")
@@ -161,6 +168,15 @@ def display_value(value, fallback="-"):
         return fallback
 
     return str(value)
+
+
+def local_time_text():
+    if ZoneInfo:
+        tz = ZoneInfo(CASON_TIMEZONE)
+    else:
+        tz = timezone(timedelta(hours=7))
+
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def write_json_file(path, data):
@@ -533,6 +549,7 @@ def build_line_message(data):
 
     di1_raw = data.get("di1_raw", "-")
     di2_raw = data.get("di2_raw", "-")
+    update_time = display_value(data.get("server_time") or local_time_text())
     rtc_time = display_value(data.get("rtc_time"))
     rtc_status = display_value(data.get("rtc_status"))
 
@@ -567,7 +584,8 @@ def build_line_message(data):
         f"Sound CH5: {relay5_sound}",
         f"Alarm Lock: {alarm}",
         f"RTC: {rtc_status}",
-        f"เวลา RTC: {rtc_time}",
+        f"เวลาอัปเดต: {update_time}",
+        f"เวลาอุปกรณ์ (RTC): {rtc_time}",
         "",
         message,
     ])

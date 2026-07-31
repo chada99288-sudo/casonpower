@@ -1326,7 +1326,7 @@ String buildStatusMessage()
     message += "\nLINE Queue: ";
     message += serverMessagePending ? "PENDING" : "EMPTY";
     message += "\nRTC: " + rtcStatusText();
-    message += "\nเวลา RTC: " + rtcTimestamp();
+    message += "\nเวลาอุปกรณ์ (RTC): " + rtcTimestamp();
     message += "\nUptime: " + String(millis() / 1000) + " วินาที";
 
     return message;
@@ -1425,7 +1425,7 @@ String buildSystemCheckMessage()
     message += "\nStatus Light: ";
     message += indicatorStateText(currentIndicatorState);
     message += "\nRTC: " + rtcStatusText();
-    message += "\nเวลา RTC: " + rtcTimestamp();
+    message += "\nเวลาอุปกรณ์ (RTC): " + rtcTimestamp();
     message += "\nFree Heap: " + String(ESP.getFreeHeap());
 
     if (!allOk)
