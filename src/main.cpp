@@ -7,6 +7,14 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+#if __has_include("device_secret.h")
+#include "device_secret.h"
+#endif
+
+#ifndef CASON_DEVICE_TOKEN
+#define CASON_DEVICE_TOKEN ""
+#endif
+
 // =====================================================
 // CASON SOLAR SAFETY CONTROLLER
 // ESP32 -> RENDER -> LINE
@@ -26,6 +34,7 @@ const char *WIFI_SETUP_AP_PASSWORD = "cason1234";
 // -----------------------------------------------------
 const char *COMMAND_SERVER_BASE_URL = "https://casonpower.onrender.com";
 const char *DEVICE_ID = "CASON-0001";
+const char *DEVICE_API_TOKEN = CASON_DEVICE_TOKEN;
 constexpr bool COMMAND_SERVER_ENABLED = true;
 constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 3000;
 constexpr uint32_t SERVER_HEARTBEAT_INTERVAL_MS = 30000;
@@ -81,6 +90,7 @@ uint8_t relayOutput = 0x00;
 
 bool relay1On = false;
 bool alarmActive = false;
+bool relayManualOff = false;
 
 bool di1Active = false;
 bool di1LastActiveState = false;
@@ -142,6 +152,7 @@ String buildSystemCheckMessage();
 bool checkCommandServer();
 bool isRelayControllerOnline();
 bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure &secureClient, const String &url);
+void addDeviceAuthHeader(HTTPClient &http);
 bool isImportantLineEvent(const String &eventName);
 void internalClockBegin();
 void updateInternalClock();
@@ -625,6 +636,7 @@ String buildServerEventPayload(
     document["di2_active"] = di2Active;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
+    document["relay_manual_off"] = relayManualOff;
     document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
     document["alarm_active"] = alarmActive;
@@ -684,6 +696,7 @@ bool sendEventToRender(
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Connection", "close");
+    addDeviceAuthHeader(http);
 
     const String payload = buildServerEventPayload(
         eventName,
@@ -911,6 +924,7 @@ void activateDI1Alarm()
     );
 
     // ตัดรีเลย์ก่อนทำงานด้านเครือข่าย
+    relayManualOff = false;
     setRelay(RELAY_CH1_POWER, false);
 
     queueServerMessage(
@@ -1039,6 +1053,7 @@ void updateAutoRestore()
 
     if (setRelay(RELAY_CH1_POWER, true))
     {
+        relayManualOff = false;
         Serial.println(
             "[SERVER] Queuing RECOVERY after restore delay"
         );
@@ -1190,6 +1205,7 @@ void processCommand(String command)
 
         if (setRelay(RELAY_CH1_POWER, true))
         {
+            relayManualOff = false;
             queueServerMessage(
                 "RELAY_ON",
                 "ACTIVE",
@@ -1201,6 +1217,7 @@ void processCommand(String command)
     {
         if (setRelay(RELAY_CH1_POWER, false))
         {
+            relayManualOff = true;
             queueServerMessage(
                 "RELAY_OFF",
                 "ACTIVE",
@@ -1232,6 +1249,7 @@ void processCommand(String command)
         }
 
         alarmActive = false;
+        relayManualOff = false;
 
         Serial.println(
             "[RESET] Alarm cleared; restore delay started"
@@ -1335,6 +1353,8 @@ String buildStatusMessage()
     message += "\nDI2: " + String(di1StateText(di2Active));
     message += "\nRelay CH1: ";
     message += relay1On ? "ON" : "OFF";
+    message += "\nRelay Mode: ";
+    message += relayManualOff ? "MANUAL_OFF" : "AUTO";
     message += "\nSound CH5: ";
     message += currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     message += "\nAlarm: ";
@@ -1398,7 +1418,7 @@ String buildSystemCheckMessage()
     const bool di1StateNormal = !di1Active && !readDI1();
     const bool di2RawNormal = readDI2Raw() == LOW;
     const bool di2StateNormal = !di2Active && !readDI2();
-    const bool expectedRelayOn = !alarmActive && !di1Active && !readDI1() && !relayRestorePending;
+    const bool expectedRelayOn = !relayManualOff && !alarmActive && !di1Active && !readDI1() && !relayRestorePending;
     const bool relayStateOk = relay1On == expectedRelayOn;
     const bool lineQueueOk = !serverMessagePending;
     const bool heapOk = ESP.getFreeHeap() > 50000;
@@ -1431,6 +1451,8 @@ String buildSystemCheckMessage()
     message += di2StateNormal ? "NORMAL" : "ACTIVE";
     message += "\nRelay CH1: ";
     message += relay1On ? "ON" : "OFF";
+    message += "\nRelay Mode: ";
+    message += relayManualOff ? "MANUAL_OFF" : "AUTO";
     message += "\nSound CH5: ";
     message += currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     message += "\nRelay Logic: " + okText(relayStateOk);
@@ -1510,6 +1532,7 @@ bool executeRemoteCommand(const String &command)
 
         if (setRelay(RELAY_CH1_POWER, true))
         {
+            relayManualOff = false;
             queueServerMessage(
                 "RELAY_ON",
                 "ACTIVE",
@@ -1530,6 +1553,7 @@ bool executeRemoteCommand(const String &command)
     {
         if (setRelay(RELAY_CH1_POWER, false))
         {
+            relayManualOff = true;
             queueServerMessage(
                 "RELAY_OFF",
                 "ACTIVE",
@@ -1569,6 +1593,7 @@ bool executeRemoteCommand(const String &command)
         }
 
         alarmActive = false;
+        relayManualOff = false;
         startRelayRestoreDelay("line_reset");
 
         queueServerMessage(
@@ -1591,6 +1616,16 @@ bool httpBeginForURL(HTTPClient &http, WiFiClient &plainClient, WiFiClientSecure
     }
 
     return http.begin(plainClient, url);
+}
+
+void addDeviceAuthHeader(HTTPClient &http)
+{
+    if (strlen(DEVICE_API_TOKEN) == 0)
+    {
+        return;
+    }
+
+    http.addHeader("X-CASON-DEVICE-TOKEN", DEVICE_API_TOKEN);
 }
 
 void updateServerHeartbeat()
@@ -1629,6 +1664,7 @@ void updateServerHeartbeat()
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Connection", "close");
+    addDeviceAuthHeader(http);
 
     JsonDocument document;
     document["device"] = DEVICE_ID;
@@ -1643,6 +1679,7 @@ void updateServerHeartbeat()
     document["di2_active"] = di2Active;
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
+    document["relay_manual_off"] = relayManualOff;
     document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
     document["alarm_active"] = alarmActive;
@@ -1696,6 +1733,7 @@ void postCommandResult(
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Connection", "close");
+    addDeviceAuthHeader(http);
 
     JsonDocument document;
     document["id"] = commandId;
@@ -1752,6 +1790,7 @@ void updateCommandPoll()
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader("Connection", "close");
+    addDeviceAuthHeader(http);
 
     const int code = http.GET();
     const String response = http.getString();
@@ -1938,6 +1977,7 @@ void setup()
     if (di1Active)
     {
         alarmActive = true;
+        relayManualOff = false;
         setRelay(RELAY_CH1_POWER, false);
 
         Serial.println();
@@ -1957,6 +1997,7 @@ void setup()
     else
     {
         alarmActive = false;
+        relayManualOff = false;
 
         if (!setRelay(RELAY_CH1_POWER, true))
         {

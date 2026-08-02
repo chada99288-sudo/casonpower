@@ -11,5 +11,7 @@ services:
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
+      - key: CASON_DEVICE_TOKEN
+        sync: false
       - key: CASON_DUPLICATE_BLOCK_SECONDS
         value: "300"

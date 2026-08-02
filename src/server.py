@@ -36,6 +36,7 @@ LINE_CHANNEL_SECRET = (
     if RAW_LINE_CHANNEL_SECRET
     else ""
 )
+DEVICE_TOKEN = os.getenv("CASON_DEVICE_TOKEN", "").strip()
 
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
@@ -275,6 +276,33 @@ def send_json(handler, code, payload):
     handler.send_header("Connection", "close")
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def verify_device_token(handler):
+    if not DEVICE_TOKEN:
+        return True
+
+    received = handler.headers.get(
+        "X-CASON-DEVICE-TOKEN",
+        ""
+    )
+
+    return hmac.compare_digest(received, DEVICE_TOKEN)
+
+
+def require_device_token(handler):
+    if verify_device_token(handler):
+        return True
+
+    send_json(
+        handler,
+        401,
+        {
+            "ok": False,
+            "error": "invalid_device_token",
+        }
+    )
+    return False
 
 
 def load_users():
@@ -804,6 +832,7 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
                 "di2_active",
                 "relay1",
                 "relay1_on",
+                "relay_manual_off",
                 "alarm_active",
                 "uptime_seconds",
                 "clock_status",
@@ -934,6 +963,8 @@ class Handler(BaseHTTPRequestHandler):
         check_heartbeat_watchdog()
 
         if path == "/api/command":
+            if not require_device_token(self):
+                return
             self.handle_command_poll()
             return
 
@@ -962,6 +993,9 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "line_secret_configured": bool(
                     LINE_CHANNEL_SECRET
+                ),
+                "device_auth_configured": bool(
+                    DEVICE_TOKEN
                 ),
                 "registered_users": len(
                     load_users()
@@ -1012,14 +1046,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/command/result":
+            if not require_device_token(self):
+                return
             self.handle_command_result()
             return
 
         if path == "/api/heartbeat":
+            if not require_device_token(self):
+                return
             self.handle_esp32_heartbeat()
             return
 
         if path in ALLOWED_ESP32_PATHS:
+            if not require_device_token(self):
+                return
             self.handle_esp32_event()
             return
 
