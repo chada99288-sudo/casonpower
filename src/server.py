@@ -600,6 +600,13 @@ def build_line_message(data):
         or "-"
     )
 
+    relay_mode = display_value(
+        data.get("relay_mode")
+        or ("MANUAL_OFF" if data.get("relay_manual_off") else "AUTO")
+    )
+
+    status_light = display_value(data.get("status_light"))
+
     relay5_sound = str(
         data.get("relay5_sound")
         or ("ON" if data.get("sound_active") else "OFF")
@@ -641,6 +648,8 @@ def build_line_message(data):
         f"DI1 RAW: {di1_raw}",
         f"DI2 RAW: {di2_raw}",
         f"Relay CH1: {relay1}",
+        f"Relay Mode: {relay_mode}",
+        f"Status Light: {status_light}",
         f"Sound CH5: {relay5_sound}",
         f"Alarm Lock: {alarm}",
         f"เวลาอัปเดต: {update_time}",
@@ -833,6 +842,10 @@ def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
                 "relay1",
                 "relay1_on",
                 "relay_manual_off",
+                "relay_mode",
+                "status_light",
+                "relay5_sound",
+                "sound_active",
                 "alarm_active",
                 "uptime_seconds",
                 "clock_status",

@@ -624,6 +624,29 @@ void updateWiFiReset()
 // Render Event Bridge
 // =====================================================
 
+const char *eventSourceText(const String &eventName)
+{
+    if (eventName == "FAULT" || eventName == "ALARM")
+    {
+        return "DI1";
+    }
+
+    if (eventName == "RELAY_ON" || eventName == "RELAY_OFF" ||
+        eventName == "RESET" || eventName == "WIFI_RESET" ||
+        eventName == "COMMAND_FAILED")
+    {
+        return "REMOTE";
+    }
+
+    if (eventName == "TEST" || eventName == "BOOT" ||
+        eventName == "RECOVERY" || eventName == "NORMAL")
+    {
+        return "SYSTEM";
+    }
+
+    return "-";
+}
+
 String buildServerEventPayload(
     const String &eventName,
     const String &statusName,
@@ -638,7 +661,7 @@ String buildServerEventPayload(
     document["status"] = statusName;
     document["message"] = message;
     document["active"] = statusName == "ACTIVE";
-    document["source"] = "DI1";
+    document["source"] = eventSourceText(eventName);
     document["di1_raw"] = readDI1Raw();
     document["di1_active"] = di1Active;
     document["di2_raw"] = readDI2Raw();
@@ -646,8 +669,10 @@ String buildServerEventPayload(
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
     document["relay_manual_off"] = relayManualOff;
+    document["relay_mode"] = relayManualOff ? "MANUAL_OFF" : "AUTO";
     document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
+    document["status_light"] = indicatorStateText(currentIndicatorState);
     document["alarm_active"] = alarmActive;
     document["restore_pending"] = relayRestorePending;
     document["uptime_seconds"] = millis() / 1000;
@@ -1693,8 +1718,10 @@ void updateServerHeartbeat()
     document["relay1"] = relay1On ? "ON" : "OFF";
     document["relay1_on"] = relay1On;
     document["relay_manual_off"] = relayManualOff;
+    document["relay_mode"] = relayManualOff ? "MANUAL_OFF" : "AUTO";
     document["relay5_sound"] = currentIndicatorState == INDICATOR_MAJOR_FAULT ? "ON" : "OFF";
     document["sound_active"] = currentIndicatorState == INDICATOR_MAJOR_FAULT;
+    document["status_light"] = indicatorStateText(currentIndicatorState);
     document["alarm_active"] = alarmActive;
     document["restore_pending"] = relayRestorePending;
     document["line_queue_pending"] = serverMessagePending;
