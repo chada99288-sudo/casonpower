@@ -464,9 +464,18 @@ def normalize_line_command(text):
         "ปิดระบบ": "OFF",
         "สถานะ": "STATUS",
         "ดูสถานะ": "STATUS",
+        "เช็คสถานะ": "STATUS",
+        "ตรวจ alarm": "STATUS",
+        "เช็ค alarm": "STATUS",
+        "ตรวจ Alarm": "STATUS",
+        "เช็ค Alarm": "STATUS",
+        "ตรวจ ALARM": "STATUS",
+        "เช็ค ALARM": "STATUS",
         "รีเซ็ต": "RESET",
         "ทดสอบ": "TEST",
-        "เช็ค": "TEST",
+        "ทดสอบลาย": "TEST",
+        "ทดสอบ LINE": "TEST",
+        "เช็ค": "CHECK",
         "ตรวจระบบ": "CHECK",
         "ตรวจสอบระบบ": "CHECK",
         "เช็คระบบ": "CHECK",
@@ -1233,6 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "OFF - ปิด Relay CH1\n"
                                 "RESET - รีเซ็ต alarm\n"
                                 "CHECK - ตรวจระบบทั้งหมด\n"
+                                "เช็ค alarm - ดูสถานะ alarm\n"
                                 "WIFI_RESET - ล้างค่า Wi-Fi"
                             )
                         )
