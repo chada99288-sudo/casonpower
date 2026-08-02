@@ -102,6 +102,7 @@ enum IndicatorState
 {
     INDICATOR_UNKNOWN,
     INDICATOR_NORMAL,
+    INDICATOR_MANUAL_OFF,
     INDICATOR_MINOR_FAULT,
     INDICATOR_MAJOR_FAULT
 };
@@ -397,6 +398,8 @@ const char *indicatorStateText(IndicatorState state)
     {
     case INDICATOR_NORMAL:
         return "NORMAL_GREEN";
+    case INDICATOR_MANUAL_OFF:
+        return "MANUAL_OFF_GREEN_YELLOW";
     case INDICATOR_MINOR_FAULT:
         return "MINOR_YELLOW";
     case INDICATOR_MAJOR_FAULT:
@@ -430,6 +433,10 @@ void updateStatusIndicators(const char *reason)
     {
         nextState = INDICATOR_MAJOR_FAULT;
     }
+    else if (relayManualOff)
+    {
+        nextState = INDICATOR_MANUAL_OFF;
+    }
     else if (di2Active || readDI2() ||
              alarmActive || relayRestorePending ||
              !relay1On ||
@@ -452,8 +459,10 @@ void updateStatusIndicators(const char *reason)
     Serial.println(reason);
 
     setIndicatorRelays(
-        currentIndicatorState == INDICATOR_NORMAL,
-        currentIndicatorState == INDICATOR_MINOR_FAULT,
+        currentIndicatorState == INDICATOR_NORMAL ||
+            currentIndicatorState == INDICATOR_MANUAL_OFF,
+        currentIndicatorState == INDICATOR_MANUAL_OFF ||
+            currentIndicatorState == INDICATOR_MINOR_FAULT,
         currentIndicatorState == INDICATOR_MAJOR_FAULT,
         currentIndicatorState == INDICATOR_MAJOR_FAULT
     );
@@ -1206,6 +1215,7 @@ void processCommand(String command)
         if (setRelay(RELAY_CH1_POWER, true))
         {
             relayManualOff = false;
+            updateStatusIndicators("manual_on");
             queueServerMessage(
                 "RELAY_ON",
                 "ACTIVE",
@@ -1218,6 +1228,7 @@ void processCommand(String command)
         if (setRelay(RELAY_CH1_POWER, false))
         {
             relayManualOff = true;
+            updateStatusIndicators("manual_off");
             queueServerMessage(
                 "RELAY_OFF",
                 "ACTIVE",
@@ -1469,7 +1480,7 @@ String buildSystemCheckMessage()
 
     if (!allOk)
     {
-        message += "\nหมายเหตุ: แดง+เสียง=DI1 alarm, เหลือง=DI2/Relay OFF/รอกู้คืน/สื่อสาร";
+        message += "\nหมายเหตุ: แดง+เสียง=DI1 alarm, เขียว+เหลือง=สั่ง OFF, เหลือง=DI2/รอกู้คืน/สื่อสาร";
     }
 
     return message;
@@ -1533,6 +1544,7 @@ bool executeRemoteCommand(const String &command)
         if (setRelay(RELAY_CH1_POWER, true))
         {
             relayManualOff = false;
+            updateStatusIndicators("remote_on");
             queueServerMessage(
                 "RELAY_ON",
                 "ACTIVE",
@@ -1554,6 +1566,7 @@ bool executeRemoteCommand(const String &command)
         if (setRelay(RELAY_CH1_POWER, false))
         {
             relayManualOff = true;
+            updateStatusIndicators("remote_off");
             queueServerMessage(
                 "RELAY_OFF",
                 "ACTIVE",
