@@ -421,6 +421,7 @@ void updateStatusIndicators(const char *reason)
     }
     else if (di2Active || readDI2() ||
              alarmActive || relayRestorePending ||
+             !relay1On ||
              serverMessagePending ||
              WiFi.status() != WL_CONNECTED)
     {
@@ -1446,7 +1447,7 @@ String buildSystemCheckMessage()
 
     if (!allOk)
     {
-        message += "\nหมายเหตุ: DI1 เป็น alarm สีแดงพร้อมเสียง CH5, DI2 เป็น dry contact NC สีเหลือง";
+        message += "\nหมายเหตุ: แดง+เสียง=DI1 alarm, เหลือง=DI2/Relay OFF/รอกู้คืน/สื่อสาร";
     }
 
     return message;
