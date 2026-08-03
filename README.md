@@ -107,6 +107,7 @@ curl https://casonpower.onrender.com/health
 - `CASON_DEVICE_TOKEN`
 - `CASON_DUPLICATE_BLOCK_SECONDS`
 - `CASON_DEFAULT_DEVICE_ID`
+- `CASON_TIMEZONE`
 - `CASON_HEARTBEAT_TIMEOUT_SECONDS`
 - `CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS`
 - `CASON_WATCHDOG_ALERT_COOLDOWN_SECONDS`
@@ -115,6 +116,14 @@ curl https://casonpower.onrender.com/health
 - `CASON_MAINTENANCE_UNTIL`
 
 ห้าม commit ไฟล์ `.env` หรือ token จริงขึ้น GitHub
+
+ถ้า `GET /health` แสดง `device_auth_configured: false` แปลว่า Render ยังไม่ได้ตั้ง `CASON_DEVICE_TOKEN`
+ให้สร้าง token เอง แล้วตั้งค่าเดียวกันทั้งสองฝั่ง:
+
+- Render Environment: `CASON_DEVICE_TOKEN`
+- ESP32 local secret: `src/device_secret.h`
+
+ห้ามเอา token จริงใส่ README, `.env.example`, log หรือ commit ขึ้น GitHub
 
 ### เปลี่ยน LINE OA หรือบัญชี LINE ที่รับแจ้งเตือน
 
@@ -153,6 +162,7 @@ CASON_ALLOWED_LINE_USER_IDS=U11111111111111111111111111111111,U22222222222222222
 Render server เก็บสถานะ watchdog แยกตาม `device_id` เป็น `ONLINE`, `OFFLINE`, `MAINTENANCE` หรือ `WAITING_FOR_FIRST_HEARTBEAT`
 
 - ค่าแนะนำ `CASON_HEARTBEAT_TIMEOUT_SECONDS=300` คือ 5 นาที
+- เวลาในข้อความ LINE ใช้ `CASON_TIMEZONE=Asia/Bangkok`
 - ส่ง LINE `OFFLINE` เฉพาะตอนเปลี่ยนจาก `ONLINE` เป็น `OFFLINE`
 - ส่ง LINE `RECOVERY/ONLINE` เฉพาะตอนเปลี่ยนจาก `OFFLINE` เป็น `ONLINE`
 - ถ้า LINE ส่งล้มเหลว จะ retry ตาม `CASON_WATCHDOG_MAX_RETRIES` พร้อม backoff

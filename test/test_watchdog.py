@@ -146,6 +146,15 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(self.messages, [])
         self.assertEqual(server.public_device_status()["state"], "MAINTENANCE")
 
+    def test_maintenance_expiry_text_uses_configured_timezone(self):
+        self.write_online_status()
+        status = server.set_maintenance_mode("CASON-0001", 1, "test")
+
+        self.assertEqual(
+            status["maintenance_until_text"],
+            "1970-01-01 08:23:21",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
