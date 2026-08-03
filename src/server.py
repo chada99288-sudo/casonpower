@@ -37,6 +37,8 @@ LINE_CHANNEL_SECRET = (
     else ""
 )
 DEVICE_TOKEN = os.getenv("CASON_DEVICE_TOKEN", "").strip()
+DEFAULT_DEVICE_ID = os.getenv("CASON_DEFAULT_DEVICE_ID", "CASON-0001").strip()
+MAX_REQUEST_BODY_BYTES = int(os.getenv("CASON_MAX_REQUEST_BODY_BYTES", "8192"))
 
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
@@ -154,6 +156,13 @@ SENSITIVE_HEALTH_KEYS = {
     "replyToken",
     "response",
 }
+
+
+def mask_identifier(value):
+    text = str(value or "")
+    if len(text) <= 8:
+        return "[REDACTED]"
+    return f"{text[:4]}...{text[-4:]}"
 
 
 def sanitize_for_health(value, key_name=""):
@@ -280,7 +289,7 @@ def send_json(handler, code, payload):
 
 def verify_device_token(handler):
     if not DEVICE_TOKEN:
-        return True
+        return False
 
     received = handler.headers.get(
         "X-CASON-DEVICE-TOKEN",
@@ -303,6 +312,24 @@ def require_device_token(handler):
         }
     )
     return False
+
+
+def parse_json_bytes(raw_body):
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None, "invalid_utf8"
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+
+    if not isinstance(data, dict):
+        return None, "json_must_be_object"
+
+    return data, None
+
+
+def command_key(device_id, command_id):
+    return f"{device_id}:{command_id}"
 
 
 def load_users():
@@ -342,7 +369,7 @@ def save_user(user_id):
         users.append(user_id)
         write_json_file(USER_FILE, users)
 
-    print(f"[USER] บันทึก LINE userId แล้ว: {user_id}")
+    print(f"[USER] บันทึก LINE userId แล้ว: {mask_identifier(user_id)}")
     return True
 
 
@@ -414,6 +441,7 @@ def save_inflight_commands(commands):
 
 
 def remember_inflight_command(command):
+    device_id = str(command.get("device_id") or DEFAULT_DEVICE_ID)
     command_id = str(command.get("id", ""))
 
     if not command_id:
@@ -421,7 +449,7 @@ def remember_inflight_command(command):
 
     with STATE_LOCK:
         commands = load_inflight_commands()
-        commands[command_id] = command
+        commands[command_key(device_id, command_id)] = command
 
         # เก็บเฉพาะคำสั่งล่าสุด ป้องกันไฟล์โตถ้า ESP32 ไม่ส่งผลกลับ
         items = sorted(
@@ -431,15 +459,16 @@ def remember_inflight_command(command):
         save_inflight_commands(dict(items))
 
 
-def pop_inflight_command(command_id):
+def pop_inflight_command(command_id, device_id=DEFAULT_DEVICE_ID):
     command_id = str(command_id or "")
+    device_id = str(device_id or DEFAULT_DEVICE_ID)
 
     if not command_id:
         return {}
 
     with STATE_LOCK:
         commands = load_inflight_commands()
-        command = commands.pop(command_id, {})
+        command = commands.pop(command_key(device_id, command_id), {})
         save_inflight_commands(commands)
 
     return command
@@ -494,14 +523,16 @@ def normalize_line_command(text):
     return ""
 
 
-def enqueue_line_command(user_id, command):
+def enqueue_line_command(user_id, command, device_id=DEFAULT_DEVICE_ID):
     command_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+    device_id = str(device_id or DEFAULT_DEVICE_ID)
 
     with STATE_LOCK:
         queue = load_command_queue()
         queue.append({
             "id": command_id,
             "command": command,
+            "device_id": device_id,
             "user_id": user_id,
             "created_at": int(time.time()),
         })
@@ -511,19 +542,37 @@ def enqueue_line_command(user_id, command):
 
     print(
         f"[COMMAND] queued id={command_id} "
-        f"command={command} user={user_id}"
+        f"device={device_id} command={command} "
+        f"user={mask_identifier(user_id)}"
     )
     return command_id
 
 
-def pop_next_command():
+def pop_next_command(device_id):
+    device_id = str(device_id or DEFAULT_DEVICE_ID)
+
     with STATE_LOCK:
         queue = load_command_queue()
 
         if not queue:
             return None
 
-        command = queue.pop(0)
+        command = None
+        remaining = []
+
+        for item in queue:
+            item_device = str(item.get("device_id") or DEFAULT_DEVICE_ID)
+            if command is None and item_device == device_id:
+                command = item
+                command["device_id"] = item_device
+                continue
+
+            remaining.append(item)
+
+        if command is None:
+            return None
+
+        queue = remaining
         save_command_queue(queue)
         remember_inflight_command(command)
 
@@ -676,7 +725,7 @@ def build_line_message(data):
 
 def push_line(user_id, text):
     if chaos_hit(CASON_CHAOS_DROP_LINE_RATE):
-        print(f"[CHAOS] simulated LINE drop user={user_id}")
+        print(f"[CHAOS] simulated LINE drop user={mask_identifier(user_id)}")
         return False, 0, "chaos_simulated_line_drop"
 
     if not LINE_TOKEN:
@@ -743,14 +792,14 @@ def push_to_all_users(text):
         if ok:
             sent += 1
             print(
-                f"[LINE] Push สำเร็จ user={user_id}"
+                f"[LINE] Push สำเร็จ user={mask_identifier(user_id)}"
             )
 
         else:
             failed += 1
             print(
                 f"[LINE] Push ไม่สำเร็จ "
-                f"user={user_id} HTTP={code}"
+                f"user={mask_identifier(user_id)} HTTP={code}"
             )
             print(
                 f"[LINE] Response={sanitize_text(response_text)}"
@@ -984,10 +1033,13 @@ class Handler(BaseHTTPRequestHandler):
 
         check_heartbeat_watchdog()
 
-        if path == "/api/command":
+        if path in {"/api/command", "/health/details"}:
             if not require_device_token(self):
                 return
-            self.handle_command_poll()
+            if path == "/api/command":
+                self.handle_command_poll()
+            else:
+                self.handle_health_details()
             return
 
         if path not in {"/", "/health"}:
@@ -1009,34 +1061,37 @@ class Handler(BaseHTTPRequestHandler):
                 "service": (
                     "CASON ESP32 LINE COMMAND SERVER V4"
                 ),
-                "port": PORT,
-                "line_token_configured": bool(
-                    LINE_TOKEN
-                ),
-                "line_secret_configured": bool(
-                    LINE_CHANNEL_SECRET
-                ),
-                "device_auth_configured": bool(
-                    DEVICE_TOKEN
-                ),
-                "registered_users": len(
-                    load_users()
-                ),
-                "queued_commands": len(
-                    load_command_queue()
-                ),
+                "status": "ok",
+            }
+        )
+
+    def handle_health_details(self):
+        status = load_heartbeat_status()
+
+        send_json(
+            self,
+            200,
+            {
+                "ok": True,
+                "service": "CASON ESP32 LINE COMMAND SERVER V4",
+                "line_token_configured": bool(LINE_TOKEN),
+                "line_secret_configured": bool(LINE_CHANNEL_SECRET),
+                "device_auth_configured": bool(DEVICE_TOKEN),
+                "default_device_id": DEFAULT_DEVICE_ID,
+                "registered_users": len(load_users()),
+                "queued_commands": len(load_command_queue()),
                 "chaos_mode": CASON_CHAOS_MODE,
                 "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
-                "esp32_heartbeat_seen": heartbeat_seen(),
-                "esp32_last_seen_age_seconds": heartbeat_age_seconds(),
+                "esp32_heartbeat_seen": heartbeat_seen(status),
+                "esp32_last_seen_age_seconds": heartbeat_age_seconds(status),
                 "esp32_offline_notified": (
-                    heartbeat_is_current()
-                    and bool(load_heartbeat_status().get("offline_notified"))
+                    heartbeat_is_current(status)
+                    and bool(status.get("offline_notified"))
                 ),
-                "watchdog_state": watchdog_state(),
+                "watchdog_state": watchdog_state(status),
                 "server_start_text": SERVER_START_TIME_TEXT,
                 "watchdog": sanitize_for_health({
-                    key: load_heartbeat_status().get(key)
+                    key: status.get(key)
                     for key in (
                         "device",
                         "server_start_text",
@@ -1050,7 +1105,7 @@ class Handler(BaseHTTPRequestHandler):
                         "last_online_line_sent",
                         "last_online_line_result",
                     )
-                    if key in load_heartbeat_status()
+                    if key in status
                 }),
             }
         )
@@ -1108,7 +1163,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return None, "invalid_content_length"
 
-        if length < 0 or length > 64000:
+        if length < 0 or length > MAX_REQUEST_BODY_BYTES:
             return None, "invalid_content_length"
 
         return self.rfile.read(length), None
@@ -1146,18 +1201,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            payload = json.loads(
-                raw_body.decode("utf-8")
-            )
-        except Exception as exc:
+        payload, json_error = parse_json_bytes(raw_body)
+        if json_error:
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "invalid_json",
-                    "detail": str(exc)
+                    "error": json_error,
                 }
             )
             return
@@ -1166,13 +1217,7 @@ class Handler(BaseHTTPRequestHandler):
 
         print("=" * 60)
         print("[WEBHOOK] รับข้อมูลจาก LINE")
-        print(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2
-            )
-        )
+        print(f"[WEBHOOK] events={len(events)}")
 
         saved_count = 0
 
@@ -1224,7 +1269,8 @@ class Handler(BaseHTTPRequestHandler):
                     elif command:
                         command_id = enqueue_line_command(
                             user_id,
-                            command
+                            command,
+                            DEFAULT_DEVICE_ID
                         )
                         print(
                             f"[COMMAND] accepted without LINE ack "
@@ -1260,10 +1306,22 @@ class Handler(BaseHTTPRequestHandler):
     def handle_command_poll(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
-        device = (query.get("device") or ["CASON-ESP32-01"])[0]
+        device = (query.get("device") or [""])[0].strip()
+
+        if not device:
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": "missing_device_id"
+                }
+            )
+            return
+
         mark_device_seen(device, "command_poll")
 
-        command = pop_next_command()
+        command = pop_next_command(device)
 
         if not command:
             send_json(
@@ -1272,6 +1330,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "command": "",
+                    "device_id": device,
                 }
             )
             return
@@ -1279,6 +1338,7 @@ class Handler(BaseHTTPRequestHandler):
         print(
             f"[COMMAND] ESP32 picked "
             f"id={command.get('id')} "
+            f"device={device} "
             f"command={command.get('command')}"
         )
 
@@ -1288,6 +1348,7 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "id": command.get("id", ""),
+                "device_id": device,
                 "command": command.get("command", ""),
                 "created_at": command.get("created_at", 0),
             }
@@ -1307,29 +1368,52 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            data = json.loads(raw_body.decode("utf-8"))
-        except Exception as exc:
+        data, json_error = parse_json_bytes(raw_body)
+        if json_error:
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "invalid_json",
-                    "detail": str(exc)
+                    "error": json_error,
+                }
+            )
+            return
+
+        device = str(data.get("device") or "")
+        if not device:
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": "missing_device_id",
                 }
             )
             return
 
         data["received_at"] = int(time.time())
-        save_command_result(data)
-
         command_id = str(data.get("id", ""))
-        inflight_command = pop_inflight_command(command_id)
+        inflight_command = pop_inflight_command(command_id, device)
+
+        if command_id and not inflight_command:
+            save_command_result(data)
+            send_json(
+                self,
+                409,
+                {
+                    "ok": False,
+                    "error": "unknown_or_duplicate_command_result",
+                }
+            )
+            return
+
+        save_command_result(data)
         user_id = inflight_command.get("user_id", "")
 
         print(
             f"[COMMAND] result id={data.get('id')} "
+            f"device={device} "
             f"command={data.get('command')} "
             f"ok={data.get('ok')}"
         )
@@ -1339,7 +1423,8 @@ class Handler(BaseHTTPRequestHandler):
         if user_id:
             print(
                 f"[COMMAND] result notification suppressed "
-                f"to avoid duplicate LINE message user={user_id}"
+                f"to avoid duplicate LINE message "
+                f"user={mask_identifier(user_id)}"
             )
 
         send_json(
@@ -1365,32 +1450,30 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            data = json.loads(raw_body.decode("utf-8"))
-        except Exception as exc:
+        data, json_error = parse_json_bytes(raw_body)
+        if json_error:
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "invalid_json",
-                    "detail": str(exc)
+                    "error": json_error
                 }
             )
             return
 
-        if not isinstance(data, dict):
+        device = str(data.get("device") or "")
+        if not device:
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "json_must_be_object"
+                    "error": "missing_device_id"
                 }
             )
             return
 
-        device = str(data.get("device") or "CASON-ESP32-01")
         status = mark_device_seen(device, "heartbeat", data)
 
         send_json(
@@ -1421,35 +1504,31 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            data = json.loads(
-                raw_body.decode("utf-8")
-            )
-        except Exception as exc:
+        data, json_error = parse_json_bytes(raw_body)
+        if json_error:
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "invalid_json",
-                    "detail": str(exc)
+                    "error": json_error
                 }
             )
             return
 
-        if not isinstance(data, dict):
+        if not data.get("device"):
             send_json(
                 self,
                 400,
                 {
                     "ok": False,
-                    "error": "json_must_be_object"
+                    "error": "missing_device_id"
                 }
             )
             return
 
         mark_device_seen(
-            str(data.get("device") or "CASON-ESP32-01"),
+            str(data.get("device")),
             "esp32_event",
             data
         )
@@ -1458,13 +1537,7 @@ class Handler(BaseHTTPRequestHandler):
         print(
             f"[ESP32] Path={self.path}"
         )
-        print(
-            json.dumps(
-                data,
-                ensure_ascii=False,
-                indent=2
-            )
-        )
+        print(f"[ESP32] device={data.get('device')} event={data.get('event') or data.get('type')}")
 
         event_name = str(
             data.get("event")
