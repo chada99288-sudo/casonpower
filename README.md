@@ -102,6 +102,41 @@ curl https://casonpower.onrender.com/health
 
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_CHANNEL_SECRET`
+- `CASON_ALLOWED_LINE_USER_IDS`
+- `CASON_AUTO_SAVE_LINE_USERS`
+- `CASON_DEVICE_TOKEN`
 - `CASON_DUPLICATE_BLOCK_SECONDS`
 
 ห้าม commit ไฟล์ `.env` หรือ token จริงขึ้น GitHub
+
+### เปลี่ยน LINE OA หรือบัญชี LINE ที่รับแจ้งเตือน
+
+ถ้าเปลี่ยน LINE OA ใหม่ ให้แก้ค่าใน Render Environment:
+
+```text
+LINE_CHANNEL_ACCESS_TOKEN=token ของ LINE OA ใหม่
+LINE_CHANNEL_SECRET=secret ของ LINE OA ใหม่
+```
+
+แล้วตั้ง Webhook URL ใน LINE Developers:
+
+```text
+https://casonpower.onrender.com/webhook
+```
+
+และเปิด `Use webhook`
+
+ถ้าต้องการเปลี่ยนบัญชี LINE ผู้รับแจ้งเตือน/ผู้สั่งงาน ให้ใส่ LINE user ID ใน Render Environment:
+
+```text
+CASON_ALLOWED_LINE_USER_IDS=Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CASON_AUTO_SAVE_LINE_USERS=0
+```
+
+ถ้ามีหลายบัญชี ให้คั่นด้วย comma:
+
+```text
+CASON_ALLOWED_LINE_USER_IDS=U11111111111111111111111111111111,U22222222222222222222222222222222
+```
+
+เมื่อกำหนด `CASON_ALLOWED_LINE_USER_IDS` แล้ว server จะใช้รายชื่อนี้เป็นหลักแทน `line_users.json`
