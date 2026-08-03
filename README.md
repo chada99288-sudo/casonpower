@@ -40,7 +40,7 @@
 ถ้ายังไม่มี Wi-Fi หรือกดคำสั่ง `WIFI_RESET` ระบบจะเปิด AP:
 
 - SSID: `CASON-SETUP`
-- Password: `cason1234`
+- Password: รหัสเฉพาะเครื่องที่สร้างจาก ESP32 MAC address หรือค่าที่ตั้งใน `CASON_SETUP_AP_PASSWORD`
 
 ให้ต่อ Wi-Fi มือถือ/คอมเข้ากับ AP นี้ แล้วเลือก Wi-Fi บ้าน/ไซต์งานจากหน้า setup
 
