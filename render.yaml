@@ -15,3 +15,15 @@ services:
         sync: false
       - key: CASON_DUPLICATE_BLOCK_SECONDS
         value: "300"
+      - key: CASON_DEFAULT_DEVICE_ID
+        value: "CASON-0001"
+      - key: CASON_HEARTBEAT_TIMEOUT_SECONDS
+        value: "300"
+      - key: CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS
+        value: "30"
+      - key: CASON_WATCHDOG_ALERT_COOLDOWN_SECONDS
+        value: "1800"
+      - key: CASON_WATCHDOG_RETRY_BASE_SECONDS
+        value: "60"
+      - key: CASON_WATCHDOG_MAX_RETRIES
+        value: "3"
