@@ -231,6 +231,17 @@ def local_time_text():
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def timestamp_to_local_text(timestamp):
+    if ZoneInfo:
+        tz = ZoneInfo(CASON_TIMEZONE)
+    else:
+        tz = timezone(timedelta(hours=7))
+
+    return datetime.fromtimestamp(float(timestamp), tz).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
 def write_json_file(path, data):
     with STATE_LOCK:
         temp_path = path.with_suffix(path.suffix + ".tmp")
@@ -865,10 +876,7 @@ def now_seconds():
 
 
 def format_local_time(timestamp):
-    return time.strftime(
-        "%Y-%m-%d %H:%M:%S",
-        time.localtime(timestamp)
-    )
+    return timestamp_to_local_text(timestamp)
 
 
 def normalize_device_id(device=None):

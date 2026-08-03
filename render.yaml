@@ -17,6 +17,8 @@ services:
         value: "300"
       - key: CASON_DEFAULT_DEVICE_ID
         value: "CASON-0001"
+      - key: CASON_TIMEZONE
+        value: "Asia/Bangkok"
       - key: CASON_HEARTBEAT_TIMEOUT_SECONDS
         value: "300"
       - key: CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS
