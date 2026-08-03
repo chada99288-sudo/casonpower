@@ -172,6 +172,29 @@ def sanitize_for_health(value, key_name=""):
     return value
 
 
+def mask_line_user_id(user_id):
+    user_id = str(user_id or "")
+
+    if len(user_id) <= 10:
+        return "[REDACTED]"
+
+    return f"{user_id[:6]}...{user_id[-4:]}"
+
+
+def configured_line_users():
+    if CASON_ALLOWED_LINE_USER_IDS:
+        return sorted(CASON_ALLOWED_LINE_USER_IDS)
+
+    return load_users()
+
+
+def line_user_source():
+    if CASON_ALLOWED_LINE_USER_IDS:
+        return "env"
+
+    return "file"
+
+
 def display_value(value, fallback="-"):
     if value is None or value == "":
         return fallback
@@ -330,6 +353,9 @@ def save_user(user_id):
     if not user_id or not user_id.startswith("U"):
         return False
 
+    if CASON_ALLOWED_LINE_USER_IDS:
+        return False
+
     if not CASON_AUTO_SAVE_LINE_USERS:
         return False
 
@@ -342,7 +368,10 @@ def save_user(user_id):
         users.append(user_id)
         write_json_file(USER_FILE, users)
 
-    print(f"[USER] บันทึก LINE userId แล้ว: {user_id}")
+    print(
+        f"[USER] บันทึก LINE userId แล้ว: "
+        f"{mask_line_user_id(user_id)}"
+    )
     return True
 
 
@@ -511,7 +540,7 @@ def enqueue_line_command(user_id, command):
 
     print(
         f"[COMMAND] queued id={command_id} "
-        f"command={command} user={user_id}"
+        f"command={command} user={mask_line_user_id(user_id)}"
     )
     return command_id
 
@@ -676,7 +705,10 @@ def build_line_message(data):
 
 def push_line(user_id, text):
     if chaos_hit(CASON_CHAOS_DROP_LINE_RATE):
-        print(f"[CHAOS] simulated LINE drop user={user_id}")
+        print(
+            f"[CHAOS] simulated LINE drop "
+            f"user={mask_line_user_id(user_id)}"
+        )
         return False, 0, "chaos_simulated_line_drop"
 
     if not LINE_TOKEN:
@@ -718,7 +750,7 @@ def push_line(user_id, text):
 
 
 def push_to_all_users(text):
-    users = load_users()
+    users = configured_line_users()
 
     if not users:
         return False, {
@@ -743,21 +775,22 @@ def push_to_all_users(text):
         if ok:
             sent += 1
             print(
-                f"[LINE] Push สำเร็จ user={user_id}"
+                f"[LINE] Push สำเร็จ "
+                f"user={mask_line_user_id(user_id)}"
             )
 
         else:
             failed += 1
             print(
                 f"[LINE] Push ไม่สำเร็จ "
-                f"user={user_id} HTTP={code}"
+                f"user={mask_line_user_id(user_id)} HTTP={code}"
             )
             print(
                 f"[LINE] Response={sanitize_text(response_text)}"
             )
 
         details.append({
-            "user_id": user_id,
+            "user_id": mask_line_user_id(user_id),
             "ok": ok,
             "http_code": code,
             "response": sanitize_text(response_text),
@@ -1020,7 +1053,10 @@ class Handler(BaseHTTPRequestHandler):
                     DEVICE_TOKEN
                 ),
                 "registered_users": len(
-                    load_users()
+                    configured_line_users()
+                ),
+                "line_user_source": (
+                    line_user_source()
                 ),
                 "queued_commands": len(
                     load_command_queue()
@@ -1339,7 +1375,8 @@ class Handler(BaseHTTPRequestHandler):
         if user_id:
             print(
                 f"[COMMAND] result notification suppressed "
-                f"to avoid duplicate LINE message user={user_id}"
+                "to avoid duplicate LINE message "
+                f"user={mask_line_user_id(user_id)}"
             )
 
         send_json(
@@ -1591,8 +1628,8 @@ def main():
         )
     )
     print(
-        f"LINE Users ที่บันทึกไว้: "
-        f"{len(load_users())}"
+        f"LINE Users source={line_user_source()} "
+        f"count={len(configured_line_users())}"
     )
     if CASON_CHAOS_MODE:
         print("CHAOS MODE: เปิดใช้งาน")

@@ -6,6 +6,7 @@
 src/line_secret.h
 src/device_secret.h
 .env
+line_users.json
 command_queue.json
 command_results.json
 command_inflight.json
