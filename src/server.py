@@ -55,17 +55,24 @@ CASON_CHAOS_DROP_LINE_RATE = float(
 )
 
 HEARTBEAT_TIMEOUT_SECONDS = int(
-    os.getenv("CASON_HEARTBEAT_TIMEOUT_SECONDS", "180")
+    os.getenv("CASON_HEARTBEAT_TIMEOUT_SECONDS", "300")
 )
-HEARTBEAT_REPEAT_ALERT_SECONDS = int(
-    os.getenv("CASON_HEARTBEAT_REPEAT_ALERT_SECONDS", "1800")
+WATCHDOG_ALERT_COOLDOWN_SECONDS = int(
+    os.getenv("CASON_WATCHDOG_ALERT_COOLDOWN_SECONDS", "1800")
 )
-HEARTBEAT_RETRY_FAILED_ALERT_SECONDS = int(
-    os.getenv("CASON_HEARTBEAT_RETRY_FAILED_ALERT_SECONDS", "60")
+WATCHDOG_RETRY_BASE_SECONDS = int(
+    os.getenv("CASON_WATCHDOG_RETRY_BASE_SECONDS", "60")
+)
+WATCHDOG_MAX_RETRIES = int(
+    os.getenv("CASON_WATCHDOG_MAX_RETRIES", "3")
 )
 HEARTBEAT_CHECK_INTERVAL_SECONDS = int(
     os.getenv("CASON_HEARTBEAT_CHECK_INTERVAL_SECONDS", "30")
 )
+CASON_DEFAULT_DEVICE_ID = os.getenv(
+    "CASON_DEFAULT_DEVICE_ID",
+    "CASON-0001"
+).strip() or "CASON-0001"
 CASON_TIMEZONE = os.getenv("CASON_TIMEZONE", "Asia/Bangkok")
 CASON_AUTO_SAVE_LINE_USERS = (
     os.getenv("CASON_AUTO_SAVE_LINE_USERS", "0") == "1"
@@ -523,6 +530,36 @@ def normalize_line_command(text):
     return ""
 
 
+def parse_maintenance_command(text):
+    raw = str(text or "").strip()
+    normalized = raw.upper().replace("ชั่วโมง", "H").replace("ชม.", "H")
+
+    if normalized in {"MAINTENANCE_OFF", "MAINTENANCE OFF", "ซ่อมเสร็จ", "ยกเลิกซ่อม"}:
+        return "OFF", 0
+
+    prefixes = (
+        "MAINTENANCE",
+        "ซ่อม",
+        "โหมดซ่อม",
+        "ย้ายเครื่อง",
+        "ปิดย้ายเครื่อง",
+    )
+
+    if not any(normalized.startswith(prefix.upper()) for prefix in prefixes):
+        return "", 0
+
+    hours = 3.0
+    for token in normalized.replace("=", " ").split():
+        token = token.rstrip("H")
+        try:
+            hours = float(token)
+            break
+        except ValueError:
+            continue
+
+    return "ON", max(1.0, min(6.0, hours))
+
+
 def enqueue_line_command(user_id, command):
     command_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
 
@@ -823,174 +860,513 @@ def save_heartbeat_status(status):
     write_json_file(HEARTBEAT_FILE, status)
 
 
-def heartbeat_last_seen(status=None):
-    status = status or load_heartbeat_status()
-    return float(status.get("last_seen", 0) or 0)
+def now_seconds():
+    return time.time()
 
 
-def heartbeat_is_current(status=None):
-    return heartbeat_last_seen(status) >= SERVER_START_TIME
+def format_local_time(timestamp):
+    return time.strftime(
+        "%Y-%m-%d %H:%M:%S",
+        time.localtime(timestamp)
+    )
 
 
-def heartbeat_seen(status=None):
-    return heartbeat_is_current(status)
+def normalize_device_id(device=None):
+    return str(device or CASON_DEFAULT_DEVICE_ID).strip() or CASON_DEFAULT_DEVICE_ID
 
 
-def heartbeat_age_seconds(status=None):
-    status = status or load_heartbeat_status()
+def normalize_heartbeat_status(status):
+    if not isinstance(status, dict):
+        return {"devices": {}}
 
-    if not heartbeat_is_current(status):
+    if isinstance(status.get("devices"), dict):
+        return status
+
+    device = normalize_device_id(status.get("device"))
+    migrated = {
+        key: value
+        for key, value in status.items()
+        if key != "devices"
+    }
+
+    if "state" not in migrated:
+        if bool(migrated.get("offline_notified")):
+            migrated["state"] = "OFFLINE"
+        elif float(migrated.get("last_seen", 0) or 0) >= SERVER_START_TIME:
+            migrated["state"] = "ONLINE"
+        else:
+            migrated["state"] = "WAITING_FOR_FIRST_HEARTBEAT"
+
+    migrated["device"] = device
+    return {
+        "devices": {
+            device: migrated
+        }
+    }
+
+
+def get_device_status(status, device=None):
+    status = normalize_heartbeat_status(status)
+    device = normalize_device_id(device)
+    devices = status.setdefault("devices", {})
+    device_status = devices.setdefault(device, {
+        "device": device,
+        "state": "WAITING_FOR_FIRST_HEARTBEAT",
+        "server_start_text": SERVER_START_TIME_TEXT,
+    })
+    device_status["device"] = device
+    return device_status
+
+
+def public_device_status(status=None, device=None):
+    status = normalize_heartbeat_status(status or load_heartbeat_status())
+    return get_device_status(status, device)
+
+
+def heartbeat_last_seen(status=None, device=None):
+    device_status = public_device_status(status, device)
+    return float(device_status.get("last_seen", 0) or 0)
+
+
+def heartbeat_is_current(status=None, device=None):
+    return heartbeat_last_seen(status, device) >= SERVER_START_TIME
+
+
+def heartbeat_seen(status=None, device=None):
+    return heartbeat_is_current(status, device)
+
+
+def heartbeat_age_seconds(status=None, device=None):
+    device_status = public_device_status(status, device)
+
+    if not heartbeat_is_current(status, device):
         return None
 
-    return max(0, int(time.time() - heartbeat_last_seen(status)))
+    return max(0, int(now_seconds() - float(device_status.get("last_seen", 0) or 0)))
 
 
-def watchdog_state(status=None):
-    status = status or load_heartbeat_status()
+def watchdog_state(status=None, device=None):
+    device_status = public_device_status(status, device)
 
-    if not heartbeat_is_current(status):
+    if is_maintenance_active(device_status):
+        return "MAINTENANCE"
+
+    if not heartbeat_is_current(status, device):
         return "WAITING_FOR_FIRST_HEARTBEAT"
 
-    if bool(status.get("offline_notified")):
-        return "OFFLINE_NOTIFIED"
-
-    return "ONLINE"
+    return str(device_status.get("state") or "ONLINE")
 
 
-def mark_device_seen(device="CASON-ESP32-01", source="unknown", data=None):
-    now = time.time()
-    status = load_heartbeat_status()
-    was_offline = bool(status.get("offline_notified"))
+def maintenance_expiry_from_env(now=None):
+    raw = os.getenv("CASON_MAINTENANCE_UNTIL", "").strip()
+    if not raw:
+        return 0.0
 
-    status.update({
-        "device": device or "CASON-ESP32-01",
-        "last_seen": now,
-        "last_seen_text": time.strftime(
-            "%Y-%m-%d %H:%M:%S",
-            time.localtime(now)
-        ),
-        "last_source": source,
-        "offline_notified": False,
-    })
+    now = now_seconds() if now is None else now
+    try:
+        value = float(raw)
+        if value > now:
+            return value
+    except ValueError:
+        pass
 
-    if isinstance(data, dict):
-        status["last_payload"] = {
-            key: data.get(key)
-            for key in (
-                "di1_raw",
-                "di1_active",
-                "di2_raw",
-                "di2_active",
-                "relay1",
-                "relay1_on",
-                "relay_manual_off",
-                "relay_mode",
-                "status_light",
-                "relay5_sound",
-                "sound_active",
-                "alarm_active",
-                "uptime_seconds",
-                "clock_status",
-                "clock_time",
-                "rtc_available",
-                "rtc_status",
-                "rtc_time",
-                "rtc_set_from_build_time",
-                "free_heap",
-                "wifi",
-                "ip",
-                "esp32_ip",
-            )
-            if key in data
-        }
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = time.mktime(time.strptime(raw, fmt))
+            if parsed > now:
+                return parsed
+        except ValueError:
+            continue
 
-    if was_offline:
-        print("[WATCHDOG] ESP32 กลับมาออนไลน์แล้ว")
-        ok, result = push_to_all_users(
-            "CASON Watchdog\n"
-            "ESP32 กลับมาออนไลน์แล้ว\n"
-            f"Device: {status['device']}\n"
-            f"Source: {source}"
-        )
-        status.update({
-            "last_online_alert": now,
-            "last_online_alert_text": time.strftime(
-                "%Y-%m-%d %H:%M:%S",
-                time.localtime(now)
-            ),
-            "last_online_line_sent": bool(ok),
-            "last_online_line_result": sanitize_for_health(result),
+    print("[WATCHDOG] CASON_MAINTENANCE_UNTIL รูปแบบไม่ถูกต้อง")
+    return 0.0
+
+
+def is_maintenance_active(device_status, now=None):
+    now = now_seconds() if now is None else now
+    until = max(
+        float(device_status.get("maintenance_until", 0) or 0),
+        maintenance_expiry_from_env(now)
+    )
+    return until > now
+
+
+def set_maintenance_mode(device, hours, source="line"):
+    now = now_seconds()
+    hours = max(1.0, min(6.0, float(hours)))
+    until = now + int(hours * 3600)
+
+    with STATE_LOCK:
+        status = normalize_heartbeat_status(load_heartbeat_status())
+        device_status = get_device_status(status, device)
+        previous_state = str(device_status.get("state") or "UNKNOWN")
+        device_status.update({
+            "state": "MAINTENANCE",
+            "maintenance_until": until,
+            "maintenance_until_text": format_local_time(until),
+            "maintenance_source": source,
+            "offline_notified": False,
         })
+        save_heartbeat_status(status)
 
-    save_heartbeat_status(status)
-    return status
+    log_watchdog_decision(
+        device_status,
+        previous_state,
+        "MAINTENANCE",
+        "maintenance_enabled"
+    )
+    return device_status
 
 
-def check_heartbeat_watchdog():
-    status = load_heartbeat_status()
-    last_seen = heartbeat_last_seen(status)
+def clear_maintenance_mode(device, source="line"):
+    with STATE_LOCK:
+        status = normalize_heartbeat_status(load_heartbeat_status())
+        device_status = get_device_status(status, device)
+        previous_state = str(device_status.get("state") or "UNKNOWN")
+        device_status.pop("maintenance_until", None)
+        device_status.pop("maintenance_until_text", None)
+        device_status["state"] = (
+            "ONLINE"
+            if heartbeat_is_current(status, device)
+            else "WAITING_FOR_FIRST_HEARTBEAT"
+        )
+        device_status["maintenance_source"] = source
+        save_heartbeat_status(status)
 
-    now = time.time()
-    has_current_heartbeat = last_seen >= SERVER_START_TIME
-    baseline = last_seen if has_current_heartbeat else SERVER_START_TIME
-    age = int(now - baseline)
+    log_watchdog_decision(
+        device_status,
+        previous_state,
+        str(device_status.get("state")),
+        "maintenance_cleared"
+    )
+    return device_status
 
-    if not has_current_heartbeat:
-        status.update({
-            "device": status.get("device") or "CASON-ESP32-01",
-            "last_source": "server_start_waiting",
+
+def log_watchdog_decision(device_status, previous_state, current_state, reason):
+    print(
+        "[WATCHDOG] "
+        f"device={device_status.get('device')} "
+        f"previous={previous_state} "
+        f"current={current_state} "
+        f"last_seen={device_status.get('last_seen_text', '-')} "
+        f"offline_alert={device_status.get('last_offline_alert_text', '-')} "
+        f"online_alert={device_status.get('last_online_alert_text', '-')} "
+        f"reason={reason}"
+    )
+
+
+def watchdog_retry_delay(retry_count):
+    delay = WATCHDOG_RETRY_BASE_SECONDS * (2 ** max(0, retry_count - 1))
+    return min(delay, WATCHDOG_ALERT_COOLDOWN_SECONDS)
+
+
+def should_send_with_cooldown(device_status, alert_key, now):
+    last_sent = float(device_status.get(alert_key, 0) or 0)
+    return last_sent <= 0 or now - last_sent >= WATCHDOG_ALERT_COOLDOWN_SECONDS
+
+
+def mark_device_seen(device=CASON_DEFAULT_DEVICE_ID, source="unknown", data=None):
+    now = now_seconds()
+    device = normalize_device_id(device)
+    alert = None
+    episode_id = None
+
+    with STATE_LOCK:
+        status = normalize_heartbeat_status(load_heartbeat_status())
+        device_status = get_device_status(status, device)
+        previous_state = str(device_status.get("state") or "UNKNOWN")
+
+        if is_maintenance_active(device_status, now):
+            current_state = "MAINTENANCE"
+        else:
+            current_state = "ONLINE"
+
+        device_status.update({
+            "device": device,
+            "state": current_state,
+            "last_seen": now,
+            "last_seen_text": format_local_time(now),
+            "last_source": source,
             "server_start_text": SERVER_START_TIME_TEXT,
             "offline_notified": False,
         })
-        for key in (
-            "last_offline_alert",
-            "last_offline_alert_text",
-            "last_offline_age_seconds",
-            "last_offline_line_sent",
-            "last_offline_line_result",
-            "last_online_alert",
-            "last_online_alert_text",
-            "last_online_line_sent",
-            "last_online_line_result",
+
+        if isinstance(data, dict):
+            device_status["last_payload"] = {
+                key: data.get(key)
+                for key in (
+                    "di1_raw",
+                    "di1_active",
+                    "di2_raw",
+                    "di2_active",
+                    "relay1",
+                    "relay1_on",
+                    "relay_manual_off",
+                    "relay_mode",
+                    "status_light",
+                    "relay5_sound",
+                    "sound_active",
+                    "alarm_active",
+                    "uptime_seconds",
+                    "clock_status",
+                    "clock_time",
+                    "rtc_available",
+                    "rtc_status",
+                    "rtc_time",
+                    "rtc_set_from_build_time",
+                    "free_heap",
+                    "wifi",
+                    "ip",
+                    "esp32_ip",
+                )
+                if key in data
+            }
+
+        if (
+            previous_state == "OFFLINE"
+            and current_state == "ONLINE"
+            and should_send_with_cooldown(device_status, "last_online_alert", now)
         ):
-            status.pop(key, None)
+            episode_id = str(device_status.get("offline_episode_id") or "")
+            device_status.update({
+                "last_online_alert": now,
+                "last_online_alert_text": format_local_time(now),
+                "last_online_idempotency_key": (
+                    f"{device}:online:{int(now)}:{episode_id}"
+                ),
+                "last_online_line_sent": False,
+                "last_online_line_result": {},
+            })
+            alert = {
+                "device": device,
+                "episode_id": episode_id,
+                "text": (
+                    "CASON Watchdog\n"
+                    "ESP32 กลับมาออนไลน์แล้ว\n"
+                    f"Device: {device}\n"
+                    f"Source: {source}"
+                ),
+            }
+            reason = "recovery_alert_scheduled"
+        elif previous_state == "OFFLINE" and current_state == "ONLINE":
+            reason = "recovery_alert_skipped_cooldown"
+        else:
+            reason = "heartbeat_seen"
 
-    if age < HEARTBEAT_TIMEOUT_SECONDS:
-        if not has_current_heartbeat:
+        save_heartbeat_status(status)
+        log_watchdog_decision(
+            device_status,
+            previous_state,
+            current_state,
+            reason
+        )
+
+    if alert:
+        ok, result = push_to_all_users(
+            alert["text"]
+        )
+        with STATE_LOCK:
+            status = normalize_heartbeat_status(load_heartbeat_status())
+            device_status = get_device_status(status, device)
+            if str(device_status.get("offline_episode_id") or "") == episode_id:
+                device_status.update({
+                    "last_online_line_sent": bool(ok),
+                    "last_online_line_result": sanitize_for_health(result),
+                })
+                save_heartbeat_status(status)
+
+    return public_device_status(device=device)
+
+
+def check_heartbeat_watchdog():
+    now = now_seconds()
+    alert = None
+
+    with STATE_LOCK:
+        status = normalize_heartbeat_status(load_heartbeat_status())
+        devices = status.setdefault("devices", {})
+
+        if not devices:
+            get_device_status(status, CASON_DEFAULT_DEVICE_ID)
+
+        for device, device_status in list(devices.items()):
+            previous_state = str(
+                device_status.get("state")
+                or "WAITING_FOR_FIRST_HEARTBEAT"
+            )
+            last_seen = float(device_status.get("last_seen", 0) or 0)
+            has_current_heartbeat = last_seen >= SERVER_START_TIME
+            baseline = last_seen if has_current_heartbeat else SERVER_START_TIME
+            age = int(now - baseline)
+
+            if is_maintenance_active(device_status, now):
+                device_status["state"] = "MAINTENANCE"
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    "MAINTENANCE",
+                    "maintenance_active_skip_offline"
+                )
+                continue
+
+            if not has_current_heartbeat:
+                device_status.update({
+                    "state": "WAITING_FOR_FIRST_HEARTBEAT",
+                    "last_source": "server_start_waiting",
+                    "server_start_text": SERVER_START_TIME_TEXT,
+                    "offline_notified": False,
+                })
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    "WAITING_FOR_FIRST_HEARTBEAT",
+                    "waiting_for_first_heartbeat"
+                )
+                continue
+
+            if age < HEARTBEAT_TIMEOUT_SECONDS:
+                if previous_state != "ONLINE":
+                    device_status["state"] = "ONLINE"
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    str(device_status.get("state")),
+                    "heartbeat_within_timeout"
+                )
+                continue
+
+            if previous_state != "OFFLINE":
+                current_state = "OFFLINE"
+                device_status["state"] = current_state
+                device_status["offline_notified"] = True
+                device_status["last_offline_age_seconds"] = age
+                device_status["offline_episode_id"] = (
+                    f"{device}:{int(last_seen)}:{int(now)}"
+                )
+                device_status["offline_retry_count"] = 0
+
+                if not should_send_with_cooldown(
+                    device_status,
+                    "last_offline_alert",
+                    now
+                ):
+                    device_status["last_offline_skip_reason"] = "cooldown"
+                    log_watchdog_decision(
+                        device_status,
+                        previous_state,
+                        current_state,
+                        "offline_transition_skip_cooldown"
+                    )
+                    continue
+
+                device_status.update({
+                    "last_offline_alert": now,
+                    "last_offline_alert_text": format_local_time(now),
+                    "last_offline_line_sent": False,
+                    "last_offline_line_result": {},
+                    "next_offline_retry": now + WATCHDOG_RETRY_BASE_SECONDS,
+                    "last_offline_idempotency_key": (
+                        f"{device}:offline:{device_status['offline_episode_id']}"
+                    ),
+                })
+                alert = {
+                    "device": device,
+                    "episode_id": device_status["offline_episode_id"],
+                    "age": age,
+                    "retry_count": 0,
+                    "text": (
+                        "CASON Watchdog\n"
+                        "ESP32 ไม่ตอบสนอง\n"
+                        f"Device: {device}\n"
+                        f"ไม่ได้รับ heartbeat {age} วินาที\n"
+                        "อาจเกิดไฟดับ, เครื่องค้าง, Wi-Fi หลุด "
+                        "หรืออินเทอร์เน็ตมีปัญหา"
+                    ),
+                }
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    current_state,
+                    "offline_transition_alert_scheduled"
+                )
+                break
+
+            if bool(device_status.get("last_offline_line_sent")):
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    "OFFLINE",
+                    "offline_alert_already_sent"
+                )
+                continue
+
+            retry_count = int(device_status.get("offline_retry_count", 0) or 0)
+            next_retry = float(device_status.get("next_offline_retry", 0) or 0)
+
+            if retry_count >= WATCHDOG_MAX_RETRIES:
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    "OFFLINE",
+                    "offline_retry_limit_reached"
+                )
+                continue
+
+            if now < next_retry:
+                log_watchdog_decision(
+                    device_status,
+                    previous_state,
+                    "OFFLINE",
+                    "offline_retry_waiting"
+                )
+                continue
+
+            retry_count += 1
+            device_status["offline_retry_count"] = retry_count
+            device_status["next_offline_retry"] = (
+                now + watchdog_retry_delay(retry_count)
+            )
+            device_status["last_offline_alert"] = now
+            device_status["last_offline_alert_text"] = format_local_time(now)
+            alert = {
+                "device": device,
+                "episode_id": str(device_status.get("offline_episode_id") or ""),
+                "age": age,
+                "retry_count": retry_count,
+                "text": (
+                    "CASON Watchdog\n"
+                    "ESP32 ไม่ตอบสนอง\n"
+                    f"Device: {device}\n"
+                    f"ไม่ได้รับ heartbeat {age} วินาที\n"
+                    f"Retry: {retry_count}/{WATCHDOG_MAX_RETRIES}"
+                ),
+            }
+            log_watchdog_decision(
+                device_status,
+                previous_state,
+                "OFFLINE",
+                "offline_retry_scheduled"
+            )
+            break
+
+        save_heartbeat_status(status)
+
+    if not alert:
+        return
+
+    ok, result = push_to_all_users(alert["text"])
+    with STATE_LOCK:
+        status = normalize_heartbeat_status(load_heartbeat_status())
+        device_status = get_device_status(status, alert["device"])
+        if str(device_status.get("offline_episode_id") or "") == alert["episode_id"]:
+            device_status["last_offline_line_sent"] = bool(ok)
+            device_status["last_offline_line_result"] = sanitize_for_health(result)
+            if not ok:
+                retry_count = int(device_status.get("offline_retry_count", 0) or 0)
+                device_status["next_offline_retry"] = (
+                    now_seconds() + watchdog_retry_delay(retry_count + 1)
+                )
             save_heartbeat_status(status)
-        return
-
-    last_alert = float(status.get("last_offline_alert", 0) or 0)
-    already_notified = bool(status.get("offline_notified"))
-
-    last_line_sent = bool(status.get("last_offline_line_sent"))
-    retry_after = (
-        HEARTBEAT_REPEAT_ALERT_SECONDS
-        if last_line_sent
-        else HEARTBEAT_RETRY_FAILED_ALERT_SECONDS
-    )
-
-    if already_notified and now - last_alert < retry_after:
-        return
-
-    status["offline_notified"] = True
-    status["last_offline_alert"] = now
-    status["last_offline_alert_text"] = time.strftime(
-        "%Y-%m-%d %H:%M:%S",
-        time.localtime(now)
-    )
-    status["last_offline_age_seconds"] = age
-
-    print(f"[WATCHDOG] ESP32 ไม่ตอบสนอง age={age}s")
-    ok, result = push_to_all_users(
-        "CASON Watchdog\n"
-        "ESP32 ไม่ตอบสนอง\n"
-        f"ไม่ได้รับ heartbeat {age} วินาที\n"
-        "อาจเกิดไฟดับ, เครื่องค้าง, Wi-Fi หลุด หรืออินเทอร์เน็ตมีปัญหา"
-    )
-    status["last_offline_line_sent"] = bool(ok)
-    status["last_offline_line_result"] = sanitize_for_health(result)
-    save_heartbeat_status(status)
 
 
 def watchdog_loop():
@@ -1015,8 +1391,6 @@ class Handler(BaseHTTPRequestHandler):
         if maybe_apply_chaos(self, path):
             return
 
-        check_heartbeat_watchdog()
-
         if path == "/api/command":
             if not require_device_token(self):
                 return
@@ -1033,6 +1407,9 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+
+        heartbeat_status = load_heartbeat_status()
+        device_status = public_device_status(heartbeat_status)
 
         send_json(
             self,
@@ -1063,18 +1440,21 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "chaos_mode": CASON_CHAOS_MODE,
                 "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS,
-                "esp32_heartbeat_seen": heartbeat_seen(),
-                "esp32_last_seen_age_seconds": heartbeat_age_seconds(),
-                "esp32_offline_notified": (
-                    heartbeat_is_current()
-                    and bool(load_heartbeat_status().get("offline_notified"))
+                "esp32_heartbeat_seen": heartbeat_seen(heartbeat_status),
+                "esp32_last_seen_age_seconds": heartbeat_age_seconds(
+                    heartbeat_status
                 ),
-                "watchdog_state": watchdog_state(),
+                "esp32_offline_notified": (
+                    heartbeat_is_current(heartbeat_status)
+                    and str(device_status.get("state")) == "OFFLINE"
+                ),
+                "watchdog_state": watchdog_state(heartbeat_status),
                 "server_start_text": SERVER_START_TIME_TEXT,
                 "watchdog": sanitize_for_health({
-                    key: load_heartbeat_status().get(key)
+                    key: device_status.get(key)
                     for key in (
                         "device",
+                        "state",
                         "server_start_text",
                         "last_seen_text",
                         "last_source",
@@ -1085,8 +1465,9 @@ class Handler(BaseHTTPRequestHandler):
                         "last_online_alert_text",
                         "last_online_line_sent",
                         "last_online_line_result",
+                        "maintenance_until_text",
                     )
-                    if key in load_heartbeat_status()
+                    if key in device_status
                 }),
             }
         )
@@ -1096,8 +1477,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if maybe_apply_chaos(self, path):
             return
-
-        check_heartbeat_watchdog()
 
         if path == "/webhook":
             self.handle_line_webhook()
@@ -1250,11 +1629,44 @@ class Handler(BaseHTTPRequestHandler):
                 if message.get("type") == "text":
                     raw_text = message.get("text", "")
                     command = normalize_line_command(raw_text)
+                    maintenance_action, maintenance_hours = (
+                        parse_maintenance_command(raw_text)
+                    )
 
                     if not is_authorized_command_user(user_id):
                         push_line(
                             user_id,
                             "ไม่ได้รับอนุญาตให้สั่งงานระบบนี้"
+                        )
+
+                    elif maintenance_action == "ON":
+                        device_status = set_maintenance_mode(
+                            CASON_DEFAULT_DEVICE_ID,
+                            maintenance_hours,
+                            "line"
+                        )
+                        push_line(
+                            user_id,
+                            (
+                                "เปิดโหมด MAINTENANCE แล้ว\n"
+                                f"Device: {device_status.get('device')}\n"
+                                "ระบบจะไม่แจ้งเตือน ESP32 OFFLINE จนถึง\n"
+                                f"{device_status.get('maintenance_until_text')}"
+                            )
+                        )
+
+                    elif maintenance_action == "OFF":
+                        device_status = clear_maintenance_mode(
+                            CASON_DEFAULT_DEVICE_ID,
+                            "line"
+                        )
+                        push_line(
+                            user_id,
+                            (
+                                "ปิดโหมด MAINTENANCE แล้ว\n"
+                                f"Device: {device_status.get('device')}\n"
+                                f"Watchdog state: {device_status.get('state')}"
+                            )
                         )
 
                     elif command:
@@ -1279,7 +1691,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "RESET - รีเซ็ต alarm\n"
                                 "CHECK - ตรวจระบบทั้งหมด\n"
                                 "เช็ค alarm - ดูสถานะ alarm\n"
-                                "WIFI_RESET - ล้างค่า Wi-Fi"
+                                "WIFI_RESET - ล้างค่า Wi-Fi\n"
+                                "MAINTENANCE 3 - งดแจ้ง OFFLINE 3 ชั่วโมง\n"
+                                "MAINTENANCE_OFF - ปิดโหมด MAINTENANCE"
                             )
                         )
 
@@ -1608,8 +2022,12 @@ def main():
         f"{HEARTBEAT_TIMEOUT_SECONDS} วินาที"
     )
     print(
-        f"Watchdog retry failed alert: "
-        f"{HEARTBEAT_RETRY_FAILED_ALERT_SECONDS} วินาที"
+        f"Watchdog cooldown: "
+        f"{WATCHDOG_ALERT_COOLDOWN_SECONDS} วินาที"
+    )
+    print(
+        f"Watchdog retry: base={WATCHDOG_RETRY_BASE_SECONDS}s "
+        f"max={WATCHDOG_MAX_RETRIES}"
     )
     print(
         "LINE Token: "
