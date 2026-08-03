@@ -43,11 +43,15 @@ constexpr bool COMMAND_SERVER_ENABLED = true;
 constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 3000;
 constexpr uint32_t SERVER_HEARTBEAT_INTERVAL_MS = 30000;
 
-// Let's Encrypt ISRG Root X1 public CA.
-// Source: https://letsencrypt.org/certs/isrgrootx1.pem
-// Subject: C=US, O=Internet Security Research Group, CN=ISRG Root X1
-// Validity: 2015-06-04 11:04:38 UTC to 2035-06-04 11:04:38 UTC
+// Public CA bundle for HTTPS connections to Render.
+// Includes Let's Encrypt ISRG Root X1 and Google Trust Services GTS Root R4,
+// because Render/Cloudflare certificate chains can rotate between public CAs.
+// Sources:
+// - https://letsencrypt.org/certs/isrgrootx1.pem
+// - https://pki.goog/roots.pem
 const char *RENDER_ROOT_CA =
+    // Subject: C=US, O=Internet Security Research Group, CN=ISRG Root X1
+    // Validity: 2015-06-04 11:04:38 UTC to 2035-06-04 11:04:38 UTC
     "-----BEGIN CERTIFICATE-----\n"
     "MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\n"
     "TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh\n"
@@ -78,6 +82,21 @@ const char *RENDER_ROOT_CA =
     "4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA\n"
     "mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d\n"
     "emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
+    "-----END CERTIFICATE-----\n"
+    // Subject: C=US, O=Google Trust Services LLC, CN=GTS Root R4
+    // Validity: 2016-06-22 00:00:00 UTC to 2036-06-22 00:00:00 UTC
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
+    "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
+    "A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n"
+    "WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz\n"
+    "IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNi\n"
+    "AATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyi\n"
+    "QHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvR\n"
+    "HYqjQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW\n"
+    "BBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D\n"
+    "9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8\n"
+    "p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
     "-----END CERTIFICATE-----\n";
 
 // -----------------------------------------------------
@@ -483,7 +502,6 @@ void updateStatusIndicators(const char *reason)
     else if (di2Active || readDI2() ||
              alarmActive || relayRestorePending ||
              !relay1On ||
-             serverMessagePending ||
              WiFi.status() != WL_CONNECTED)
     {
         nextState = INDICATOR_MINOR_FAULT;
